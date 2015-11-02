@@ -1,6 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
- * Copyright (C) 2003  Robert S. Thomas
+ * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
+ * Portions of this file Copyright (C) 2014 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -15,7 +16,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
- * The author of this program can be reached at thomas@infolab.northwestern.edu
+ * The maintainer of this program can be reached at jsettlers@nand.net
  **/
 package soc.message;
 
@@ -24,13 +25,19 @@ import java.util.StringTokenizer;
 
 /**
  * This message means that someone is joining a channel
+ *<P>
+ * Once the client has successfully joined or created a channel or game, the
+ * password field can be left blank in later join/create requests.  All server
+ * versions ignore the password field after a successful request.
  *
  * @author Robert S Thomas
  */
 public class SOCJoin extends SOCMessage
 {
+    private static final long serialVersionUID = 100L;  // last structural change v1.0.0 or earlier
+
     /**
-     * symbol to represent a null password
+     * symbol to represent a null or empty password over the network, to avoid 2 adjacent field-delimiter characters
      */
     private static String NULLPASS = "\t";
 
@@ -40,7 +47,7 @@ public class SOCJoin extends SOCMessage
     private String nickname;
 
     /**
-     * Optional password
+     * Optional password, or "" if none
      */
     private String password;
 
@@ -50,16 +57,17 @@ public class SOCJoin extends SOCMessage
     private String channel;
 
     /**
-     * Host name
+     * Server host name to which the client is connecting.
+     * Since the client is already connected when it sends the message, this is informational.
      */
     private String host;
 
     /**
-     * Create a Join message.
+     * Create a Join Channel message.
      *
      * @param nn  nickname
-     * @param pw  password
-     * @param hn  host name
+     * @param pw  optional password, or "" if none
+     * @param hn  server host name
      * @param ch  name of chat channel
      */
     public SOCJoin(String nn, String pw, String hn, String ch)
@@ -80,7 +88,7 @@ public class SOCJoin extends SOCMessage
     }
 
     /**
-     * @return the password
+     * @return the optional password, or "" if none
      */
     public String getPassword()
     {
@@ -88,6 +96,8 @@ public class SOCJoin extends SOCMessage
     }
 
     /**
+     * Get the server host name to which the client is connecting.
+     * Since the client is already connected when it sends the message, this is only informational.
      * @return the host name
      */
     public String getHost()
@@ -117,8 +127,8 @@ public class SOCJoin extends SOCMessage
      * JOIN sep nickname sep2 password sep2 host sep2 channel
      *
      * @param nn  the nickname
-     * @param pw  the password
-     * @param hn  the host name
+     * @param pw  the optional password, or "" if none
+     * @param hn  the server host name
      * @param ch  the channel name
      * @return    the command string
      */
@@ -135,7 +145,7 @@ public class SOCJoin extends SOCMessage
     }
 
     /**
-     * Parse the command String into a Join message
+     * Parse the command String into a Join Channel message.
      *
      * @param s   the String to parse
      * @return    a Join message, or null of the data is garbled
@@ -174,8 +184,9 @@ public class SOCJoin extends SOCMessage
      */
     public String toString()
     {
-        String s = "SOCJoin:nickname=" + nickname + "|password=" + password + "|host=" + host + "|channel=" + channel;
+        String s = "SOCJoin:nickname=" + nickname + "|password=***|host=" + host + "|channel=" + channel;
 
         return s;
     }
+
 }

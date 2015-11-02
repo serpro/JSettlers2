@@ -100,6 +100,12 @@ public class SOCBuildingPanel extends Panel
     private ColorSquare cloth;
     private Label clothLab;
 
+    /** For game scenario {@link SOCGameOption#K_SC_WOND _SC_WOND}, the
+     *  "Wonders" button that brings up a dialog with info and Build buttons. Null otherwise.
+     *  @since 2.0.00
+     */
+    private Button wondersBut;
+
     // Large Sea Board Ship button; @since 2.0.00
     private Label shipT;  // text
     private Label shipC;  // cost
@@ -188,7 +194,7 @@ public class SOCBuildingPanel extends Panel
         roadT = new Label(strings.get("build.road"));  // "Road: "
         add(roadT);
         new AWTToolTip(strings.get("build.road.vp"), roadT);  // "0 VP  (longest road = 2 VP)"
-        roadC = new Label(strings.get("build.cost"));  // "Cost: "
+        roadC = new Label(strings.get("build.cost"));  // "Cost:"
         add(roadC);
         roadWood = new ColorSquare(ColorSquare.WOOD, 1);
         add(roadWood);
@@ -305,22 +311,30 @@ public class SOCBuildingPanel extends Panel
                 add(cloth);
                 cloth.setTooltipText(TTIP_CLOTH_TEXT);
             }
+            else if (ga.isGameOptionSet(SOCGameOption.K_SC_WOND))
+            {
+                wondersBut = new Button(strings.get("build.specitem._SC_WOND"));  // "Wonders..."
+                add(wondersBut);
+                new AWTToolTip(strings.get("build.specitem._SC_WOND.tip"), wondersBut);  // "Build or get info about the Wonders"
+                wondersBut.addActionListener(this);
+            }
         } else {
-            // shipBut, cloth already null
+            // shipBut, cloth, wondersBut already null
         }
 
         if (ga.hasSeaBoard || (ga.vp_winner != 10))  // 10, not SOCGame.VP_WINNER_STANDARD, in case someone changes that
         {
             final String TTIP_VP_TEXT = strings.get("build.vp.to.win.tip");  // "Victory Points total needed to win the game"
 
+            // add vpToWin above its label (z-order) in case of slight overlap
+            vpToWin = new ColorSquare(ColorSquare.GREY, ga.vp_winner);
+            vpToWin.setTooltipText(TTIP_VP_TEXT);
+            add(vpToWin);
+
             vpToWinLab = new Label(strings.get("build.vp.to.win"));  // "VP to win:"
             vpToWinLab.setAlignment(Label.RIGHT);
             add(vpToWinLab);
             new AWTToolTip(TTIP_VP_TEXT, vpToWinLab);
-
-            vpToWin = new ColorSquare(ColorSquare.GREY, ga.vp_winner);
-            vpToWin.setTooltipText(TTIP_VP_TEXT);
-            add(vpToWin);
         } else {
             vpToWinLab = null;
             vpToWin = null;
@@ -431,7 +445,7 @@ public class SOCBuildingPanel extends Panel
         FontMetrics fm = this.getFontMetrics(this.getFont());
         final int lineH = ColorSquare.HEIGHT;
         final int rowSpaceH = lineH / 2;
-        final int costW = fm.stringWidth(roadC.getText().replace(' ', '_'));    //Bug in stringWidth does not give correct size for ' ' so use '_'
+        final int costW = fm.stringWidth(roadC.getText().trim()) + 4;  // "Cost:"
         final int butW = 50;
         final int margin = 2;
 
@@ -452,10 +466,10 @@ public class SOCBuildingPanel extends Panel
         curX = buttonMargin + butW + margin;
         roadC.setSize(costW, lineH);
         roadC.setLocation(curX, curY);
-        curX += 1 + costW + 3;
+        curX += costW + margin;
         roadWood.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
         roadWood.setLocation(curX, curY);
-        curX += (ColorSquare.WIDTH + 3);
+        curX += (ColorSquare.WIDTH + 2);
         roadClay.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
         roadClay.setLocation(curX, curY);
 
@@ -464,7 +478,7 @@ public class SOCBuildingPanel extends Panel
             // Ship buying button is top-center of panel
             // (3 squares over from Road)
             final int shipTW = fm.stringWidth(shipT.getText());
-            curX += 3 * (ColorSquare.WIDTH + 3);
+            curX += 3 * (ColorSquare.WIDTH + 2);
             shipT.setSize(shipTW, lineH);
             shipT.setLocation(curX, curY);
             curX += shipTW + margin;
@@ -473,10 +487,10 @@ public class SOCBuildingPanel extends Panel
             curX += butW + margin;
             shipC.setSize(costW, lineH);
             shipC.setLocation(curX, curY);
-            curX += 1 + costW + 3;
+            curX += costW + margin;
             shipWood.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
             shipWood.setLocation(curX, curY);
-            curX += (ColorSquare.WIDTH + 3);
+            curX += (ColorSquare.WIDTH + 2);
             shipSheep.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
             shipSheep.setLocation(curX, curY);
         }
@@ -491,16 +505,16 @@ public class SOCBuildingPanel extends Panel
         curX = buttonMargin + butW + margin;
         settlementC.setSize(costW, lineH);
         settlementC.setLocation(curX, curY);
-        curX += 1 + costW + 3;
+        curX += costW + margin;
         settlementWood.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
         settlementWood.setLocation(curX, curY);
-        curX += (ColorSquare.WIDTH + 3);
+        curX += (ColorSquare.WIDTH + 2);
         settlementClay.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
         settlementClay.setLocation(curX, curY);
-        curX += (ColorSquare.WIDTH + 3);
+        curX += (ColorSquare.WIDTH + 2);
         settlementWheat.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
         settlementWheat.setLocation(curX, curY);
-        curX += (ColorSquare.WIDTH + 3);
+        curX += (ColorSquare.WIDTH + 2);
         settlementSheep.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
         settlementSheep.setLocation(curX, curY);
 
@@ -532,10 +546,10 @@ public class SOCBuildingPanel extends Panel
         curX = buttonMargin + butW + margin;
         cityC.setSize(costW, lineH);
         cityC.setLocation(curX, curY);
-        curX += 1 + costW + 3;
+        curX += costW + margin;
         cityWheat.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
         cityWheat.setLocation(curX, curY);
-        curX += (ColorSquare.WIDTH + 3);
+        curX += (ColorSquare.WIDTH + 2);
         cityOre.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
         cityOre.setLocation(curX, curY);
 
@@ -543,11 +557,19 @@ public class SOCBuildingPanel extends Panel
         {
             // Cloth General Supply count is 3rd row, 2 squares to right of City costs
             final int clothTW = fm.stringWidth(clothLab.getText());
-            curX += 3 * (ColorSquare.WIDTH + 3);
+            curX += 3 * (ColorSquare.WIDTH + 2);
             clothLab.setSize(clothTW + (2 * margin) - 1, lineH);
             clothLab.setLocation(curX, curY);
             curX += clothTW + (2 * margin);
             cloth.setLocation(curX, curY);
+        }
+
+        if (wondersBut != null)
+        {
+            // Wonders button takes same place that clothLab would: 3rd row, 2 squares to right of City costs
+            curX += 3 * (ColorSquare.WIDTH + 2);
+            wondersBut.setSize(dim.width - curX - (2 * butW) - (2 * margin), lineH);
+            wondersBut.setLocation(curX, curY);
         }
 
         curY += (rowSpaceH + lineH);
@@ -560,17 +582,17 @@ public class SOCBuildingPanel extends Panel
         curX = buttonMargin + butW + margin;
         cardC.setSize(costW, lineH);
         cardC.setLocation(curX, curY);
-        curX += 1 + costW + 3;
+        curX += costW + margin;
         cardWheat.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
         cardWheat.setLocation(curX, curY);
-        curX += (ColorSquare.WIDTH + 3);
+        curX += (ColorSquare.WIDTH + 2);
         cardSheep.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
         cardSheep.setLocation(curX, curY);
-        curX += (ColorSquare.WIDTH + 3);
+        curX += (ColorSquare.WIDTH + 2);
         cardOre.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
         cardOre.setLocation(curX, curY);
 
-        curX += 2 * (ColorSquare.WIDTH + 3);
+        curX += 2 * (ColorSquare.WIDTH + 2);
         // cardCount.setSize(ColorSquare.WIDTH, ColorSquare.HEIGHT);
         cardCount.setLocation(curX, curY);
         final int cardCLabW = fm.stringWidth(cardCountLab.getText());
@@ -589,24 +611,22 @@ public class SOCBuildingPanel extends Panel
         gameInfoBut.setLocation(curX, curY);
         statsBut.setSize(butW * 2, lineH);
         if (hasLargeBoard)
-            statsBut.setLocation(curX, curY - lineH - 5);
+            statsBut.setLocation(curX, 1 + (2 * (rowSpaceH + lineH)));
         else
             statsBut.setLocation(curX, 1);
-
-        if ((maxPlayers <= 4) && ! hasLargeBoard)
-            curY += (lineH + 5);
 
         // VP to Win label moves to make room for various buttons.
         if (vpToWin != null)
         {
             // #VP total to Win
+            int vpLabW = fm.stringWidth(vpToWinLab.getText());
+
             if (hasLargeBoard)
             {
                 // bottom-right corner of panel, left of Game Info
-                curX -= (1.5f * ColorSquare.WIDTH + margin);
+                curX -= (ColorSquare.WIDTH + (2*margin));
                 vpToWin.setLocation(curX, curY);
 
-                final int vpLabW = fm.stringWidth(vpToWinLab.getText());
                 curX -= (vpLabW + (2*margin));
                 vpToWinLab.setLocation(curX, curY);
                 vpToWinLab.setSize(vpLabW + margin, lineH);
@@ -614,22 +634,32 @@ public class SOCBuildingPanel extends Panel
                 // upper-right corner of panel
                 //    If 6-player, shift left to make room for Game Stats button
                 //    (which is moved up to make room for Special Building button)
-                curY = 1;
-                final int vpLabW = fm.stringWidth(vpToWinLab.getText());
                 if (maxPlayers <= 4)
                 {
-                    // 4-player: align from right
+                    // 4-player: row 2, align from right; not enough room on row 1 with Game Stats button
+                    curY = 1 + (rowSpaceH + lineH);
+
                     curX = dim.width - ColorSquare.WIDTH - margin;
                     vpToWin.setLocation(curX, curY);
 
                     curX -= (vpLabW + (2*margin));
                     vpToWinLab.setLocation(curX, curY);
                 } else {
-                    // 6-player: align from left, from width of piece-buying buttons/colorsquares
-                    curX = buttonMargin + butW + margin + (1 + costW + 3) + (4 * (ColorSquare.WIDTH + 3));
+                    // 6-player: row 1, align from left if possible, above "special building" button's wide panel
+                    curY = 1;
+                    curX = buttonMargin + butW + margin + (costW + margin) + (4 * (ColorSquare.WIDTH + 2));
+                    final int statsButX = statsBut.getX();
+                    if (curX + ColorSquare.WIDTH + vpLabW + (2*margin) > statsButX)
+                        curX -= (2 * (ColorSquare.WIDTH + 2));
                     vpToWinLab.setLocation(curX, curY);
 
                     curX += (vpLabW + (2*margin));
+                    final int xmax = statsButX - ColorSquare.WIDTH - margin;
+                    if (curX > xmax)
+                    {
+                        vpLabW = xmax - vpToWinLab.getX() - margin;  // clip to prevent overlap
+                        curX = xmax;
+                    }
                     vpToWin.setLocation(curX, curY);
                 }
                 vpToWinLab.setSize(vpLabW + margin, lineH);
@@ -671,6 +701,14 @@ public class SOCBuildingPanel extends Panel
             f.setVisible(true);
             f.setLocation(this.getLocationOnScreen());
             statsFrame = f;
+
+            return;
+        }
+        else if (e.getSource() == wondersBut)
+        {
+            final SOCSpecialItemDialog dia = new SOCSpecialItemDialog(pi, SOCGameOption.K_SC_WOND);
+            dia.pack();
+            dia.setVisible(true);  // is modal
 
             return;
         }

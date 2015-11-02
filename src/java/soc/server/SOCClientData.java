@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas
- * This file copyright (C) 2008-2010,2013 Jeremy D Monin <jeremy@nand.net>
+ * This file copyright (C) 2008-2010,2013,2015 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,11 +19,14 @@
 package soc.server;
 
 import java.util.Locale;
+import java.util.Map;
 import java.util.TimerTask;
 
+import soc.message.SOCGameOptionGetInfos;  // for javadoc
 import soc.message.SOCMessage;  // for javadoc
 import soc.server.genericServer.StringConnection;
 import soc.util.SOCGameList;
+import soc.util.SOCStringManager;  // for javadoc
 
 /**
  * The server's place to track client-specific information across games.
@@ -48,6 +51,7 @@ public class SOCClientData
      * since older versions had all messages in english.
      * Bots always use a {@code null} locale; they don't care about message text contents, and a
      * null locale means they won't set any {@code SOCGame.hasMultiLocales} flag by joining.
+     * @see #wantsI18N
      * @since 2.0.00
      */
     public Locale locale;
@@ -59,9 +63,30 @@ public class SOCClientData
      * if null, should probably assume <tt>en_US</tt>
      * since older versions had all messages in english.
      * Bots always use a {@code null} locale, see {@link #locale} javadoc for details.
+     * @see #wantsI18N
      * @since 2.0.00
      */
     public String localeStr;
+
+    /**
+     * If this flag is set, client has determined it wants localized strings (I18N),
+     * and asked for them early in the connect process by sending a message
+     * that had {@link SOCGameOptionGetInfos#hasTokenGetI18nDescs()} true.
+     * Server can later check this flag to see if responses to various client request
+     * messages should include localized strings.
+     *<P>
+     * Set this flag only if:
+     * <UL>
+     *  <LI> Client has sent a {@link SOCGameOptionGetInfos} request with
+     *     {@link SOCGameOptionGetInfos#hasTokenGetI18nDescs() msg.hasTokenGetI18nDescs()}
+     *  <LI> {@link StringConnection#getI18NLocale() c.getI18NLocale()} != {@code null}
+     *  <LI> {@link StringConnection#getVersion() c.getVersion()} &gt;= {@link SOCStringManager#VERSION_FOR_I18N};
+     *     this is already implied by the client sending a message with {@code hasTokenGetI18nDescs}.
+     * </UL>
+     * @see #locale
+     * @since 2.0.00
+     */
+    public boolean wantsI18N;
 
     /**
      * Number of games/channels this client has created, which currently exist (not deleted)
@@ -78,6 +103,87 @@ public class SOCClientData
      * @since 1.1.06
      */
     private boolean sentGameList;
+
+    /**
+     * If true we've called {@link SOCServer#clientHasLocalizedStrs_gameScenarios(StringConnection)},
+     * storing the result in {@link #localeHasScenStrings}.
+     * @since 2.0.00
+     */
+    public boolean checkedLocaleScenStrings;
+
+    /**
+     * If true we've called {@link SOCServer#clientHasLocalizedStrs_gameScenarios(StringConnection)},
+     * and this client's locale is not {@code null} and has at least some localized scenario strings
+     * (see that method's javadoc for details).
+     * @since 2.0.00
+     * @see #checkedLocaleScenStrings
+     * @see #sentAllScenarioStrings
+     */
+    public boolean localeHasScenStrings;
+
+    /**
+     * True if we've sent localized strings for all {@link soc.game.SOCScenario SOCScenario}s.
+     * To reduce network traffic, those large strings aren't sent unless the client is creating a
+     * new game and needs the scenario dropdown.
+     *<P>
+     * Also true if the client's locale doesn't have localized strings for scenarios,
+     * or if the client is too old (1.1.xx) to use i18n localization.
+     *
+     * @since 2.0.00
+     * @see #scenariosInfoSent
+     * @see #sentAllScenarioInfo
+     * @see #localeHasScenStrings
+     */
+    public boolean sentAllScenarioStrings;
+
+    /**
+     * True if we've sent all updated {@link soc.game.SOCScenario SOCScenario} info.
+     * Like {@link #sentAllScenarioStrings}, scenario info messages aren't sent unless needed.
+     *<P>
+     * Also true if the client is too old (1.1.xx) to use scenarios.
+     *
+     * @since 2.0.00
+     * @see #scenariosInfoSent
+     * @see #sentAllScenarioStrings
+     */
+    public boolean sentAllScenarioInfo;
+
+    /**
+     * For a scenario keyname in {@link #scenariosInfoSent}, value indicating that the client
+     * was sent localized scenario strings (not all scenario info fields), or that the client
+     * requested them and no localized strings were found for that scenario.
+     * @see #SENT_SCEN_INFO
+     * @since 2.0.00
+     */
+    public static final String SENT_SCEN_STRINGS = "S";
+
+    /**
+     * For a scenario keyname in {@link #scenariosInfoSent}, value indicating that the client
+     * was sent all scenario info fields (not only localized scenario strings).
+     * @see #SENT_SCEN_STRINGS
+     * @since 2.0.00
+     */
+    public static final String SENT_SCEN_INFO = "I";
+
+    /**
+     * The {@link soc.game.SOCScenario SOCScenario} keynames for which we've
+     * sent localized strings or all scenario info fields.
+     * To reduce network traffic, those large strings aren't sent unless
+     * the client is joining a game with a scenario, or has requested them.
+     *<P>
+     * For any scenario's keyname here, the value will be either {@link #SENT_SCEN_STRINGS} or {@link #SENT_SCEN_INFO}.
+     * If a scenario's key isn't contained in this map, nothing has been sent about it
+     * unless the {@link #sentAllScenarioStrings} flag is set.
+     *<P>
+     * Null if {@link #sentAllScenarioStrings} or if client hasn't requested any
+     * or joined any game that has a scenario.
+     *<P>
+     * {@link soc.game.SOCGameOption SOCGameOption} strings are also localized, but aren't tracked
+     * the same way because game option strings are all sent when the client connects.
+     *
+     * @since 2.0.00
+     */
+    public Map<String, String> scenariosInfoSent;
 
     /**
      * Is this connection a robot?

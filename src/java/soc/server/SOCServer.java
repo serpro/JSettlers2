@@ -2,7 +2,7 @@
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
  * Portions of this file Copyright (C) 2005 Chadwick A McHenry <mchenryc@acm.org>
- * Portions of this file Copyright (C) 2007-2014 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012 Paul Bilnoski <paul@bilnoski.net>
  *
  * This program is free software; you can redistribute it and/or
@@ -38,20 +38,28 @@ import soc.util.I18n;
 import soc.util.SOCGameBoardReset;
 import soc.util.SOCGameList;  // used in javadoc
 import soc.util.SOCRobotParameters;
+import soc.util.SOCServerFeatures;
 import soc.util.SOCStringManager;
+import soc.util.Triple;
 import soc.util.Version;
 
+import java.io.BufferedReader;
 import java.io.EOFException;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.net.SocketException;
 import java.sql.SQLException;
 import java.text.MessageFormat;  // used in javadocs
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Hashtable;
 import java.util.Iterator;
 import java.util.List;
@@ -60,6 +68,7 @@ import java.util.Map;
 import java.util.MissingResourceException;
 import java.util.Properties;
 import java.util.Random;
+import java.util.Set;
 import java.util.Vector;
 
 /**
@@ -110,6 +119,7 @@ import java.util.Vector;
  * Java properties (starting with "jsettlers.") were added in 1.1.09, with constant names
  * starting with PROP_JSETTLERS_, and listed in {@link #PROPS_LIST}.
  */
+@SuppressWarnings("serial")
 public class SOCServer extends Server
 {
     /**
@@ -129,10 +139,16 @@ public class SOCServer extends Server
 
     /**
      * Default maximum number of connected clients (30; {@link #maxConnections} field).
-     * Always at least 10 more than {@link #SOC_STARTROBOTS_DEFAULT}.
+     * Always at least 20 more than {@link #SOC_STARTROBOTS_DEFAULT}.
      * @since 1.1.15
      */
-    public static final int SOC_MAXCONN_DEFAULT = Math.max(30, 10 + SOC_STARTROBOTS_DEFAULT);
+    public static final int SOC_MAXCONN_DEFAULT = Math.max(30, 20 + SOC_STARTROBOTS_DEFAULT);
+
+    /**
+     * Filename {@code "jsserver.properties"} for the optional server startup properties file.
+     * @since 2.0.00
+     */
+    public static final String SOC_SERVER_PROPS_FILENAME = "jsserver.properties";
 
     // If a new property is added, please add a PROP_JSETTLERS_ constant
     // and also add it to PROPS_LIST.
@@ -170,7 +186,13 @@ public class SOCServer extends Server
     /**
      * Property <tt>jsettlers.bots.botgames.total</tt> will start robot-only games,
      * a few at a time, until this many have been played. (The default is 0.)
-     * @since 2.0.00 
+     *<P>
+     * If this property's value != 0, a robots-only game can be started with the
+     * *STARTBOTGAME* debug command. This can be used to test the bots with any given
+     * combination of game options and scenarios.  To permit starting such games without
+     * also starting any at server startup, use a value less than 0.
+     *
+     * @since 2.0.00
      */
     public static final String PROP_JSETTLERS_BOTS_BOTGAMES_TOTAL = "jsettlers.bots.botgames.total";
 
@@ -181,11 +203,56 @@ public class SOCServer extends Server
      * 30% will be "smart" robots, the other 70% will be "fast" robots.
      * Remember that robots count against the {@link #PROP_JSETTLERS_CONNECTIONS max connections} limit.
      *<P>
-     * Before v1.1.19, the default was 0, no robots were started by default.
+     * Before v1.1.19 the default was 0, no robots were started by default.
      * @since 1.1.09
      * @see #PROP_JSETTLERS_BOTS_BOTGAMES_TOTAL
      */
     public static final String PROP_JSETTLERS_STARTROBOTS = "jsettlers.startrobots";
+
+    /**
+     * Boolean property {@code jsettlers.accounts.open} to permit open registration.
+     * If this property is Y, anyone can create their own user accounts.
+     * Otherwise only existing users can create new accounts after the first account.
+     *<P>
+     * The default is N in version 1.1.19 and newer; previously was Y by default.
+     * To require that all players have accounts in the database, see {@link #PROP_JSETTLERS_ACCOUNTS_REQUIRED}.
+     * To restrict which users can create accounts, see {@link #PROP_JSETTLERS_ACCOUNTS_ADMINS}.
+     *<P>
+     * If this field is Y when the server is initialized, the server calls
+     * {@link SOCServerFeatures#add(String) features.add}({@link SOCServerFeatures#FEAT_OPEN_REG}).
+     * @since 1.1.19
+     */
+    public static final String PROP_JSETTLERS_ACCOUNTS_OPEN = "jsettlers.accounts.open";
+
+    /**
+     * Boolean property {@code jsettlers.accounts.required} to require that all players have user accounts.
+     * If this property is Y, a jdbc database is required and all users must have an account and password
+     * in the database. If a client tries to join or create a game or channel without providing a password,
+     * they will be sent {@link SOCStatusMessage#SV_PW_REQUIRED}.
+     *<P>
+     * The default is N.
+     *<P>
+     * If {@link #PROP_JSETTLERS_ACCOUNTS_OPEN} is used, anyone can create their own account (Open Registration).
+     * @since 1.1.19
+     */
+    public static final String PROP_JSETTLERS_ACCOUNTS_REQUIRED = "jsettlers.accounts.required";
+
+    /**
+     * Property {@code jsettlers.accounts.admins} to restrict which usernames can create accounts.
+     * If this property is set, it is a comma-separated list of usernames (nicknames), and
+     * a user must authenticate and be on this whitelist to create user accounts.
+     *<P>
+     * If any other user requests account creation, the server will reply with
+     * {@link SOCStatusMessage#SV_ACCT_NOT_CREATED_DENIED}.
+     *<P>
+     * The server doesn't require or check at startup that the named accounts all already
+     * exist, this is just a list of names.
+     *<P>
+     * This property can't be set at the same time as {@link #PROP_JSETTLERS_ACCOUNTS_OPEN},
+     * they ask for opposing security policies.
+     * @since 1.1.19
+     */
+    public static final String PROP_JSETTLERS_ACCOUNTS_ADMINS = "jsettlers.accounts.admins";
 
     /**
      * Property <tt>jsettlers.allow.debug</tt> to permit debug commands over TCP.
@@ -198,7 +265,10 @@ public class SOCServer extends Server
      * Property <tt>jsettlers.client.maxcreategames</tt> to limit the amount of
      * games that a client can create at once. (The default is 5.)
      * Once a game is completed and deleted (all players leave), they can create another.
+     * Set this to -1 to disable it; 0 will disallow any game creation.
+     * This limit is ignored for practice games.
      * @since 1.1.10
+     * @see #CLIENT_MAX_CREATE_GAMES
      */
     public static final String PROP_JSETTLERS_CLI_MAXCREATEGAMES = "jsettlers.client.maxcreategames";
 
@@ -206,9 +276,24 @@ public class SOCServer extends Server
      * Property <tt>jsettlers.client.maxcreatechannels</tt> to limit the amount of
      * chat channels that a client can create at once. (The default is 2.)
      * Once a channel is deleted (all members leave), they can create another.
+     * Set this to -1 to disable it; 0 will disallow any chat channel creation.
      * @since 1.1.10
+     * @see #CLIENT_MAX_CREATE_CHANNELS
+     * @see SOCServerFeatures#FEAT_CHANNELS
      */
     public static final String PROP_JSETTLERS_CLI_MAXCREATECHANNELS = "jsettlers.client.maxcreatechannels";
+
+    /**
+     * Property prefix {@code jsettlers.gameopt.} to specify game option defaults in a server properties file.
+     * Option names are case-insensitive past this prefix. Syntax for default value is the same as on the
+     * command line, for example:
+     *<pre> jsettlers.gameopt.RD=y
+     * jsettlers.gameopt.n7=t7</pre>
+     *<P>
+     * See {@link #parseCmdline_DashedArgs(String[])} for how game option properties are checked at startup.
+     * @since 2.0.00
+     */
+    public static final String PROP_JSETTLERS_GAMEOPT_PREFIX = "jsettlers.gameopt.";
 
     /**
      * List and descriptions of all available JSettlers {@link Properties properties},
@@ -224,11 +309,15 @@ public class SOCServer extends Server
         PROP_JSETTLERS_PORT,     "TCP port number for server to bind to",
         PROP_JSETTLERS_CONNECTIONS,   "Maximum connection count, including robots (default " + SOC_MAXCONN_DEFAULT + ")",
         PROP_JSETTLERS_STARTROBOTS,   "Number of robots to create at startup (default " + SOC_STARTROBOTS_DEFAULT + ")",
+        PROP_JSETTLERS_ACCOUNTS_OPEN, "Permit open self-registration of new user accounts? (if Y and using a DB)",
+        PROP_JSETTLERS_ACCOUNTS_REQUIRED, "Require all players to have a user account? (if Y; requires a DB)",
+        PROP_JSETTLERS_ACCOUNTS_ADMINS, "Permit only these usernames to create accounts (comma-separated)",
         PROP_JSETTLERS_ALLOW_DEBUG,   "Allow remote debug commands? (if Y)",
         PROP_JSETTLERS_CLI_MAXCREATECHANNELS,   "Maximum simultaneous channels that a client can create",
         PROP_JSETTLERS_CLI_MAXCREATEGAMES,      "Maximum simultaneous games that a client can create",
+        PROP_JSETTLERS_GAMEOPT_PREFIX + "*",    "Game option defaults, case-insensitive: jsettlers.gameopt.RD=y",
         I18n.PROP_JSETTLERS_LOCALE,             "Locale override from the default, such as es or en_US",
-        PROP_JSETTLERS_BOTS_BOTGAMES_TOTAL,     "Run this many robot-only games, a few at a time (default 0)",
+        PROP_JSETTLERS_BOTS_BOTGAMES_TOTAL,     "Run this many robot-only games, a few at a time (default 0); allow bot-only games",
         PROP_JSETTLERS_BOTS_COOKIE,             "Robot cookie value (default is random generated each startup)",
         PROP_JSETTLERS_BOTS_SHOWCOOKIE,         "Flag to show the robot cookie value at startup",
         SOCDBHelper.PROP_JSETTLERS_DB_USER,     "DB username",
@@ -290,7 +379,7 @@ public class SOCServer extends Server
 
     /**
      * Force robot to end their turn after this many seconds
-     * of inactivity.
+     * of inactivity. Default is 8.
      * @see #checkForExpiredTurns(long)
      * @since 1.1.11
      */
@@ -320,6 +409,7 @@ public class SOCServer extends Server
      * Set this to -1 to disable it; 0 will disallow any game creation.
      * This limit is ignored for practice games.
      * @since 1.1.10
+     * @see #PROP_JSETTLERS_CLI_MAXCREATEGAMES
      */
     public static int CLIENT_MAX_CREATE_GAMES = 5;
 
@@ -327,7 +417,14 @@ public class SOCServer extends Server
      * Maximum number of chat channels that a client can create at the same time (default 2).
      * Once this limit is reached, the client must delete a channel before creating a new one.
      * Set this to -1 to disable it; 0 will disallow any chat channel creation.
+     *<P>
+     * If this field is nonzero when the server is initialized, the server calls
+     * {@link SOCServerFeatures#add(String) features.add}({@link SOCServerFeatures#FEAT_CHANNELS}).
+     * If the field value is changed afterwards, that affects new clients joining the server
+     * but does not clear {@code FEAT_CHANNELS} from the {@code features} list.
+     *
      * @since 1.1.10
+     * @see #PROP_JSETTLERS_CLI_MAXCREATECHANNELS
      */
     public static int CLIENT_MAX_CREATE_CHANNELS = 2;
 
@@ -338,6 +435,27 @@ public class SOCServer extends Server
      * @see soc.server.genericServer.LocalStringConnection
      */
     public static String PRACTICE_STRINGPORT = "SOCPRACTICE";
+
+    // These AUTH_OR_REJECT constants are int not enum for backwards compatibility with 1.1.xx (java 1.4)
+
+    /** {@link #authOrRejectClientUser(StringConnection, String, String, int, boolean, boolean) authOrRejectClientUser(....)}
+     *  result: Failed authentication, failed name validation, or name is already logged in and that
+     *  connection hasn't timed out yet
+     *  @since 1.1.19
+     */
+    private static final int AUTH_OR_REJECT__FAILED = 1;
+
+    /** {@link #authOrRejectClientUser(StringConnection, String, String, int, boolean, boolean) authOrRejectClientUser(....)}
+     *  result: Authentication succeeded
+     *  @since 1.1.19
+     */
+    private static final int AUTH_OR_REJECT__OK = 2;
+
+    /** {@link #authOrRejectClientUser(StringConnection, String, String, int, boolean, boolean) authOrRejectClientUser(....)}
+     *  result: Authentication succeeded, is taking over another connection
+     *  @since 1.1.19
+     */
+    private static final int AUTH_OR_REJECT__TAKING_OVER = 3;
 
     /**
      * So we can get random numbers.
@@ -367,17 +485,64 @@ public class SOCServer extends Server
     /**
      * Properties for the server, or empty if that constructor wasn't used.
      * Property names are held in PROP_* and SOCDBHelper.PROP_* constants.
+     * Some properties activate optional {@link #features}.
      * @see #SOCServer(int, Properties)
      * @see #PROPS_LIST
+     * @see #getConfigBoolProperty(Properties, String, boolean)
+     * @see #getConfigIntProperty(Properties, String, int)
      * @since 1.1.09
      */
     private Properties props;
+
+    /**
+     * True if {@link #props} contains a property which is used to run the server in Utility Mode
+     * instead of Server Mode.  In Utility Mode the server reads its properties, initializes its
+     * database connection if any, and performs one task such as a password reset or table/index creation.
+     * It won't listen at a TCP port or start other threads.
+     *<P>
+     * For a list of Utility Mode properties, see {@link #hasUtilityModeProperty()}.
+     * @see #utilityModeMessage
+     * @since 2.0.00
+     */
+    private boolean hasUtilityModeProp;
+
+    /**
+     * If {@link #hasUtilityModeProp}, an optional status message to print before exiting, or {@code null}.
+     * @since 2.0.00
+     */
+    private String utilityModeMessage;
+
+    /**
+     * Active optional server features, if any; see {@link SOCServerFeatures} constants for currently defined features.
+     * Features are activated through the command line or {@link #props}.
+     * @since 1.1.19
+     */
+    private SOCServerFeatures features = new SOCServerFeatures(false);
 
     /**
      * Game type handler, currently shared by all game instances.
      * @since 2.0.00
      */
     private final SOCGameHandler handler = new SOCGameHandler(this);
+
+    /**
+     * Server internal flag to indicate that user accounts are active, and authentication
+     * is required to create accounts, and there aren't any accounts in the database yet.
+     * (Server's active features include {@link SOCServerFeatures#FEAT_ACCTS} but not
+     * {@link SOCServerFeatures#FEAT_OPEN_REG}.) This flag is set at startup, instead of
+     * querying {@link SOCDBHelper#countUsers()} every time a client connects.
+     *<P>
+     * Used for signaling to {@code SOCAccountClient} that it shouldn't ask for a
+     * password when connecting to create the first account, by sending the client
+     * {@link SOCServerFeatures#FEAT_OPEN_REG} along with the actually active features.
+     *<P>
+     * The first successful account creation will clear this flag.
+     *<P>
+     * {@link #handleCREATEACCOUNT(StringConnection, SOCCreateAccount)} does call {@code countUsers()}
+     * and requires auth if any account exists, even if this flag is set.
+     * @since 1.1.19
+     */
+    private boolean acctsNotOpenRegButNoUsers;
 
     /**
      * JM temp - generated password to allow clean server shutdown.
@@ -445,7 +610,7 @@ public class SOCServer extends Server
     private static boolean hasStartupPrintAndExit = false;
 
     /**
-     * Did the command line include --option / -o to set {@link SOCGameOption game option} values?
+     * Did the properties or command line include --option / -o to set {@link SOCGameOption game option} values?
      * Checked in constructors for possible stderr option-values printout.
      * @since 1.1.07
      */
@@ -490,7 +655,7 @@ public class SOCServer extends Server
      * Number of seconds before a connection is considered disconnected, and
      * its nickname can be "taken over" by a new connection with the right password.
      * Used only when a password is given by the new connection.
-     * @see #checkNickname(String, StringConnection)
+     * @see #checkNickname(String, StringConnection, boolean)
      * @since 1.1.08
      */
     public static final int NICKNAME_TAKEOVER_SECONDS_SAME_PASSWORD = 15;
@@ -499,7 +664,7 @@ public class SOCServer extends Server
      * Number of seconds before a connection is considered disconnected, and
      * its nickname can be "taken over" by a new connection from the same IP.
      * Used when no password is given by the new connection.
-     * @see #checkNickname(String, StringConnection)
+     * @see #checkNickname(String, StringConnection, boolean)
      * @since 1.1.08
      */
     public static final int NICKNAME_TAKEOVER_SECONDS_SAME_IP = 30;
@@ -508,7 +673,7 @@ public class SOCServer extends Server
      * Number of seconds before a connection is considered disconnected, and
      * its nickname can be "taken over" by a new connection from a different IP.
      * Used when no password is given by the new connection.
-     * @see #checkNickname(String, StringConnection)
+     * @see #checkNickname(String, StringConnection, boolean)
      * @since 1.1.08
      */
     public static final int NICKNAME_TAKEOVER_SECONDS_DIFFERENT_IP = 150;
@@ -584,17 +749,39 @@ public class SOCServer extends Server
      * Description string for SOCGameOption {@code "PL"} hardcoded into the SOCGameOption class,
      * from {@link SOCGameOption#getOption(String, boolean) SOCGameOption.getOption("PL", false)}.
      * Used for determining whether a client's i18n locale has localized option descriptions,
-     * by comparing {@code PL}'s {@link SOCVersionedItem#desc SOCGameOption.desc} to StringManager.get("gameopt.PL").
+     * by comparing {@code PL}'s {@link SOCVersionedItem#getDesc() SOCGameOption.desc} to
+     * StringManager.get({@code "gameopt.PL"}).
      *<P>
      * String value is captured here as soon as SOCServer is referenced, in case SOCPlayerClient's
      * practice server will localize the descriptions used by {@link SOCGameOption#getOption(String, boolean)}.
      * @since 2.0.00
+     * @see {@link #i18n_scenario_SC_WOND_desc}
      */
     private final static String i18n_gameopt_PL_desc;
     static
     {
         final SOCGameOption optPL = SOCGameOption.getOption("PL", false);
-        i18n_gameopt_PL_desc = (optPL != null) ? optPL.desc : "";
+        i18n_gameopt_PL_desc = (optPL != null) ? optPL.getDesc() : "";
+    }
+
+    /**
+     * Short description string for SOCScenario {@code "SC_WOND"} hardcoded into the SOCScenario class.
+     * Used for determining whether a client's i18n locale has localized scenario descriptions,
+     * by comparing {@code SC_WOND}'s {@link SOCVersionedItem#getDesc() SOCScenario.desc} to
+     * StringManager.get({@code "gamescen.SC_WOND.n"}).
+     *<P>
+     * String value is captured here as soon as SOCServer is referenced, in case SOCPlayerClient's
+     * practice server will localize the scenario descriptions.
+     *
+     * @see #clientHasLocalizedStrs_gameScenarios(StringConnection)
+     * @since 2.0.00
+     * @see #i18n_gameopt_PL_desc
+     */
+    final static String i18n_scenario_SC_WOND_desc;
+    static
+    {
+        final SOCScenario scWond = SOCScenario.getScenario(SOCScenario.K_SC_WOND);
+        i18n_scenario_SC_WOND_desc = (scWond != null) ? scWond.getDesc() : "";
     }
 
 
@@ -610,6 +797,14 @@ public class SOCServer extends Server
 
     String databaseUserName;
     String databasePassword;
+
+    /**
+     * User admins whitelist, from {@link #PROP_JSETTLERS_ACCOUNTS_ADMINS}, or {@code null} if disabled.
+     * If not null, only usernames on this list can create user accounts in
+     * {@link #handleCREATEACCOUNT(StringConnection, SOCCreateAccount)}.
+     * @since 1.1.19
+     */
+    private Set<String> databaseUserAdmins;
 
     /**
      * Create a Settlers of Catan server listening on TCP port p.
@@ -641,8 +836,8 @@ public class SOCServer extends Server
     }
 
     /**
-     * Create a Settlers of Catan server listening on TCP port p.
-     * You must start its thread yourself.
+     * Create a Settlers of Catan server listening on TCP port {@code p}.
+     * Most server threads are started here; you must start its main thread yourself.
      * Optionally connect to a database for user info and game stats.
      *<P>
      * The database properties are {@link SOCDBHelper#PROP_JSETTLERS_DB_USER}
@@ -660,35 +855,62 @@ public class SOCServer extends Server
      * Will also print game options to stderr if
      * any option defaults require a minimum client version, or if
      * {@link #hasSetGameOptions} is set.
-     * 
+     *
+     *<H3>Utility Mode:</H3>
+     * Some properties such as {@link SOCDBHelper#PROP_JSETTLERS_DB_SCRIPT_SETUP}
+     * will initialize the server environment, connect to the database, perform
+     * a single task, and exit.  This is called <B>Utility Mode</B>.  In Utility Mode
+     * the caller should not start threads or continue normal startup (Server Mode).
+     * See {@link #hasUtilityModeProperty()} for more details.
+     *<P>
+     * For the password reset property {@link SOCDBHelper#PROP_IMPL_JSETTLERS_PW_RESET}, the
+     * caller will need to prompt for and change the password; this constructor will not do that.
+     *
      * @param p    the TCP port that the server listens on
      * @param props  null, or properties containing {@link #PROP_JSETTLERS_CONNECTIONS}
      *       and any other desired properties.
      *       <P>
-     *       If <code>props</code> != null but doesn't contain {@link #PROP_JSETTLERS_STARTROBOTS},
+     *       If {@code props} is null, the properties will be created empty
+     *       and no bots will be started ({@link #PROP_JSETTLERS_STARTROBOTS} == 0).
+     *       If {@code props} != null but doesn't contain {@link #PROP_JSETTLERS_STARTROBOTS},
      *       the default value {@link #SOC_STARTROBOTS_DEFAULT} will be used.
+     *       <P>
+     *       {@code props} may contain game option default values (property names starting
+     *       with {@link #PROP_JSETTLERS_GAMEOPT_PREFIX}).  Calls {@link #parseCmdline_GameOption(String, HashMap)}
+     *       for each one found to set its default (current) value.  If a default scenario is
+     *       specified (game option {@code "SC"}), the scenario may include game options which
+     *       conflict with those in {@code props}: Consider calling {@link #checkScenarioOpts(Map, boolean, String)}
+     *       to check for that and warn the user.
+     *       <P>
+     *       If you provide {@code props}, consider checking for a {@code jsserver.properties} file
+     *       ({@link #SOC_SERVER_PROPS_FILENAME}) and calling {@link Properties#load(java.io.InputStream)}
+     *       with it before calling this constructor.
      * @since 1.1.09
      * @throws SocketException  If a network setup problem occurs
      * @throws EOFException   If db setup script ran successfully and server should exit now
      * @throws SQLException   If db setup script fails, or need db but can't connect
+     * @throws IllegalArgumentException  If {@code props} contains game options ({@code jsettlers.gameopt.*})
+     *       with bad syntax. See {@link #PROP_JSETTLERS_GAMEOPT_PREFIX} for expected syntax.
+     *       See {@link #parseCmdline_DashedArgs(String[])} for how game option properties are checked.
+     *       {@link Throwable#getMessage()} will have problem details.
      * @see #PROPS_LIST
      */
     public SOCServer(final int p, Properties props)
-        throws SocketException, EOFException, SQLException
+        throws SocketException, EOFException, SQLException, IllegalArgumentException
     {
         super(p);
-        maxConnections = init_getIntProperty(props, PROP_JSETTLERS_CONNECTIONS, SOC_MAXCONN_DEFAULT);
-        allowDebugUser = init_getBoolProperty(props, PROP_JSETTLERS_ALLOW_DEBUG, false);
-        CLIENT_MAX_CREATE_GAMES = init_getIntProperty(props, PROP_JSETTLERS_CLI_MAXCREATEGAMES, CLIENT_MAX_CREATE_GAMES);
-        CLIENT_MAX_CREATE_CHANNELS = init_getIntProperty(props, PROP_JSETTLERS_CLI_MAXCREATECHANNELS, CLIENT_MAX_CREATE_CHANNELS);
+        maxConnections = getConfigIntProperty(props, PROP_JSETTLERS_CONNECTIONS, SOC_MAXCONN_DEFAULT);
+        allowDebugUser = getConfigBoolProperty(props, PROP_JSETTLERS_ALLOW_DEBUG, false);
+        CLIENT_MAX_CREATE_GAMES = getConfigIntProperty(props, PROP_JSETTLERS_CLI_MAXCREATEGAMES, CLIENT_MAX_CREATE_GAMES);
+        CLIENT_MAX_CREATE_CHANNELS = getConfigIntProperty(props, PROP_JSETTLERS_CLI_MAXCREATECHANNELS, CLIENT_MAX_CREATE_CHANNELS);
         String dbuser = props.getProperty(SOCDBHelper.PROP_JSETTLERS_DB_USER, "socuser");
         String dbpass = props.getProperty(SOCDBHelper.PROP_JSETTLERS_DB_PASS, "socpass");
         initSocServer(dbuser, dbpass, props);
     }
 
     /**
-     * Create a Settlers of Catan server listening on local stringport s.
-     * You must start its thread yourself.
+     * Create a Settlers of Catan server listening on local stringport {@code s}.
+     * Most server threads are started here; you must start its main thread yourself.
      * Optionally connect to a database for user info and game stats.
      *<P>
      * No bots will be started here ({@link #PROP_JSETTLERS_STARTROBOTS} == 0),
@@ -720,7 +942,9 @@ public class SOCServer extends Server
     /**
      * Common init for all constructors.
      * Prints some progress messages to {@link System#err}.
-     * Starts all server threads except the main thread.
+     * Sets game option default values via {@link #init_propsSetGameopts(Properties)}.
+     * Starts all server threads except the main thread, unless constructed in Utility Mode
+     * ({@link #hasUtilityModeProp}).
      * If {@link #PROP_JSETTLERS_STARTROBOTS} is specified, those aren't started until {@link #serverUp()}.
      *<P>
      * If there are problems with the network setup ({@link #error} != null),
@@ -733,23 +957,42 @@ public class SOCServer extends Server
      * {@link SOCDBHelper#PROP_JSETTLERS_DB_URL}, {@link SOCDBHelper#PROP_JSETTLERS_DB_DRIVER}
      * or {@link SOCDBHelper#PROP_JSETTLERS_DB_JAR} is specified in {@code props}),
      * this method will throw {@link SQLException}.
+     *
+     *<H5>Utility Mode</H5>
+     * If a db setup script runs successfully, or {@code props} contains the password reset parameter
+     * {@link SOCDBHelper#PROP_IMPL_JSETTLERS_PW_RESET}, the server does not complete its startup;
+     * this method will set {@link #hasUtilityModeProp} and (only for setup script) throw {@link EOFException}.
      *<P>
-     * If a db setup script runs successfully,
-     * the server does not complete its startup; this method will throw {@link EOFException}.
+     * For the password reset parameter, the caller will need to prompt for and change the password;
+     * this method will not do that.
      *
      * @param databaseUserName Used for DB connect - not retained
      * @param databasePassword Used for DB connect - not retained
      * @param props  null, or properties containing {@link #PROP_JSETTLERS_CONNECTIONS}
      *       and any other desired properties.
-     *       If <code>props</code> is null, the properties will be created empty.
-     *       If <code>props</code> != null but doesn't contain {@link #PROP_JSETTLERS_STARTROBOTS},
+     *       <P>
+     *       If {@code props} is null, the properties will be created empty
+     *       and no bots will be started ({@link #PROP_JSETTLERS_STARTROBOTS} == 0).
+     *       If {@code props} != null but doesn't contain {@link #PROP_JSETTLERS_STARTROBOTS},
      *       the default value {@link #SOC_STARTROBOTS_DEFAULT} will be used.
+     *       <P>
+     *       {@code props} may contain game option default values (property names starting
+     *       with {@link #PROP_JSETTLERS_GAMEOPT_PREFIX}).  Calls {@link #parseCmdline_GameOption(String, HashMap)}
+     *       for each one found to set its default (current) value. If a default scenario is
+     *       specified (game option {@code "SC"}), the scenario may include game options which
+     *       conflict with those in {@code props}: Consider calling {@link #checkScenarioOpts(Map, boolean, String)}
+     *       to check for that and warn the user.
      * @throws SocketException  If a network setup problem occurs
-     * @throws EOFException   If db setup script ran successfully and server should exit now
+     * @throws EOFException   If db setup script ran successfully and server should exit now;
+     *       Utility Mode ({@link #hasUtilityModeProp}).
      * @throws SQLException   If db setup script fails, or need db but can't connect
+     * @throws IllegalArgumentException  If {@code props} contains game options ({@code jsettlers.gameopt.*})
+     *       with bad syntax. See {@link #PROP_JSETTLERS_GAMEOPT_PREFIX} for expected syntax.
+     *       See {@link #parseCmdline_DashedArgs(String[])} for how game option properties are checked.
+     *       {@link Throwable#getMessage()} will have problem details.
      */
     private void initSocServer(String databaseUserName, String databasePassword, Properties props)
-        throws SocketException, EOFException, SQLException
+        throws SocketException, EOFException, SQLException, IllegalArgumentException
     {
         Version.printVersionText(System.err, "Java Settlers Server ");
 
@@ -771,6 +1014,11 @@ public class SOCServer extends Server
 
             if (! props.containsKey(PROP_JSETTLERS_STARTROBOTS))
                 props.setProperty(PROP_JSETTLERS_STARTROBOTS, Integer.toString(SOC_STARTROBOTS_DEFAULT));
+
+            // Set game option defaults from any jsettlers.gameopt.* properties found.
+            // If problems found, throws IllegalArgumentException with details.
+            // Ignores unknown scenario ("SC"), see init_checkScenarioOpts for that.
+            init_propsSetGameopts(props);
         }
 
         this.props = props;
@@ -809,12 +1057,35 @@ public class SOCServer extends Server
         try
         {
             SOCDBHelper.initialize(databaseUserName, databasePassword, props);
+            features.add(SOCServerFeatures.FEAT_ACCTS);
             System.err.println("User database initialized.");
 
             if (props.getProperty(SOCDBHelper.PROP_JSETTLERS_DB_SCRIPT_SETUP) != null)
             {
                 // the sql script was ran by initialize
-                throw new EOFException("DB setup script successful");
+
+                final String msg = "DB setup script successful";
+                hasUtilityModeProp = true;
+                utilityModeMessage = msg;
+                throw new EOFException(msg);
+            }
+
+            if (props.getProperty(SOCDBHelper.PROP_IMPL_JSETTLERS_PW_RESET) != null)
+            {
+                hasUtilityModeProp = true;
+
+                // Caller will need to prompt for and change the password
+            }
+
+            // open reg for user accounts?  if not, see if we have any yet
+            if (getConfigBoolProperty(props, PROP_JSETTLERS_ACCOUNTS_OPEN, false))
+            {
+                features.add(SOCServerFeatures.FEAT_OPEN_REG);
+                if (! hasUtilityModeProp)
+                    System.err.println("User database Open Registration is active, anyone can create accounts.");
+            } else {
+                if (SOCDBHelper.countUsers() == 0)
+                    acctsNotOpenRegButNoUsers = true;
             }
         }
         catch (SQLException x) // just a warning
@@ -843,6 +1114,12 @@ public class SOCServer extends Server
                 // If other db props were asked for, the user is expecting a DB.
                 // So, fail instead of silently continuing without it.
                 System.err.println("* Exiting because current startup properties specify a database.");
+                throw x;  // x is SQLException
+            }
+
+            if (props.containsKey(SOCDBHelper.PROP_IMPL_JSETTLERS_PW_RESET))
+            {
+                System.err.println("* Exiting because --pw-reset requires a database.");
                 throw x;  // x is SQLException
             }
 
@@ -875,8 +1152,18 @@ public class SOCServer extends Server
 
         // No errors; continue normal startup.
 
+        if (hasUtilityModeProp)
+        {
+            return;  // <--- don't continue startup if Utility Mode ---
+        }
+
+        final boolean accountsRequired = getConfigBoolProperty(props, PROP_JSETTLERS_ACCOUNTS_REQUIRED, false);
+
         if (SOCDBHelper.isInitialized())
         {
+            if (accountsRequired)
+                System.err.println("User database accounts are required for all players.");
+
             // Note: This hook is not triggered under eclipse debugging.
             //    https://bugs.eclipse.org/bugs/show_bug.cgi?id=38016  "WONTFIX/README"
             try
@@ -899,22 +1186,65 @@ public class SOCServer extends Server
                 System.err.println("Warning: Could not register shutdown hook for database disconnect. Check java security settings.");
             }
         }
+        else if (accountsRequired)
+        {
+            final String errmsg = "* Property " + PROP_JSETTLERS_ACCOUNTS_REQUIRED + " requires a database.";
+            System.err.println(errmsg);
+            throw new IllegalArgumentException(errmsg);
+        }
 
         startTime = System.currentTimeMillis();
         numberOfGamesStarted = 0;
         numberOfGamesFinished = 0;
         numberOfUsers = 0;
         clientPastVersionStats = new HashMap<Integer, Integer>();
-        numRobotOnlyGamesRemaining = init_getIntProperty(props, PROP_JSETTLERS_BOTS_BOTGAMES_TOTAL, 0);
+        numRobotOnlyGamesRemaining = getConfigIntProperty(props, PROP_JSETTLERS_BOTS_BOTGAMES_TOTAL, 0);
         if (numRobotOnlyGamesRemaining > 0)
         {
                 final int n = SOCGame.MAXPLAYERS_STANDARD;
-                if (n > init_getIntProperty(props, PROP_JSETTLERS_STARTROBOTS, 0))
+                if (n > getConfigIntProperty(props, PROP_JSETTLERS_STARTROBOTS, 0))
                 {
-                    final String errmsg = ("*** To start robot-only games, server needs at least " + n +  " robots started.");
+                    final String errmsg =
+                        ("*** To start robot-only games, server needs at least " + n + " robots started.");
                     System.err.println(errmsg);
                     throw new IllegalArgumentException(errmsg);
-                }            
+                }
+        }
+
+        if (CLIENT_MAX_CREATE_CHANNELS != 0)
+            features.add(SOCServerFeatures.FEAT_CHANNELS);
+
+        if (props.containsKey(PROP_JSETTLERS_ACCOUNTS_ADMINS))
+        {
+            String errmsg = null;
+
+            final String userAdmins = props.getProperty(PROP_JSETTLERS_ACCOUNTS_ADMINS);
+            if (! SOCDBHelper.isInitialized())
+            {
+                errmsg = "* Property " + PROP_JSETTLERS_ACCOUNTS_ADMINS + " requires a database.";
+            } else if (userAdmins.length() == 0) {
+                errmsg = "* Property " + PROP_JSETTLERS_ACCOUNTS_ADMINS + " cannot be an empty string.";
+            } else if (features.isActive(SOCServerFeatures.FEAT_OPEN_REG)) {
+                errmsg = "* Cannot use Open Registration with User Accounts Admin List.";
+            } else {
+                databaseUserAdmins = new HashSet<String>();
+                for (String adm : userAdmins.split(SOCMessage.sep2))  // split on "," - sep2 will never be in a username
+                {
+                    String na = adm.trim();
+                    if (na.length() > 0)
+                        databaseUserAdmins.add(na);
+                }
+                if (databaseUserAdmins.isEmpty())  // was it commas only?
+                    errmsg = "* Property " + PROP_JSETTLERS_ACCOUNTS_ADMINS + " cannot be an empty list.";
+            }
+
+            if (errmsg != null)
+            {
+                System.err.println(errmsg);
+                throw new IllegalArgumentException(errmsg);
+            }
+
+            System.err.println("User account administrators limited to: " + userAdmins);
         }
 
         /**
@@ -939,7 +1269,7 @@ public class SOCServer extends Server
             printGameOptions();
         }
 
-        if (init_getBoolProperty(props, PROP_JSETTLERS_BOTS_SHOWCOOKIE, false))
+        if (getConfigBoolProperty(props, PROP_JSETTLERS_BOTS_SHOWCOOKIE, false))
             System.err.println("Robot cookie: " + robotCookie);
 
         System.err.print("The server is ready.");
@@ -950,15 +1280,22 @@ public class SOCServer extends Server
     }
 
     /**
-     * For initialization, get and parse an integer property, or use its default instead.
-     * @param props  Properties to look in
+     * Get and parse an integer config property, or use its default instead.
+     *<P>
+     * Before v2.0.00, this method was <tt>init_getIntProperty</tt>.
+     *
+     * @param props  Properties to look in, such as {@link SOCServer#props}, or null for <tt>pDefault</tt>
      * @param pName  Property name
      * @param pDefault  Default value to use if not found or not parsable
      * @return The property's parsed integer value, or <tt>pDefault</tt>
      * @since 1.1.10
+     * @see #getConfigBoolProperty(Properties, String, boolean)
      */
-    private static int init_getIntProperty(Properties props, final String pName, final int pDefault)
+    private static int getConfigIntProperty(Properties props, final String pName, final int pDefault)
     {
+        if (props == null)
+            return pDefault;
+
         try
         {
             String mcs = props.getProperty(pName, Integer.toString(pDefault));
@@ -971,18 +1308,22 @@ public class SOCServer extends Server
     }
 
     /**
-     * Get and parse a boolean property, or use its default instead.
+     * Get and parse a boolean config property, or use its default instead.
      * True values are: T Y 1.
      * False values are: F N 0.
      * Not case-sensitive.
      * Any other value will be ignored and get <tt>pDefault</tt>.
      * @param props  Properties to look in, such as {@link SOCServer#props}, or null for <tt>pDefault</tt>
+     *<P>
+     * Before v2.0.00, this method was <tt>init_getBoolProperty</tt>.
+     *
      * @param pName  Property name
      * @param pDefault  Default value to use if not found or not parsable
      * @return The property's parsed value, or <tt>pDefault</tt>
      * @since 1.1.14
+     * @see #getConfigIntProperty(Properties, String, int)
      */
-    private static boolean init_getBoolProperty(Properties props, final String pName, final boolean pDefault)
+    private static boolean getConfigBoolProperty(Properties props, final String pName, final boolean pDefault)
     {
         if (props == null)
             return pDefault;
@@ -1013,12 +1354,22 @@ public class SOCServer extends Server
      * is bound and listening, in the main thread.
      * If {@link #PROP_JSETTLERS_STARTROBOTS} is specified, starts those {@link SOCRobotClient}s now.
      * If {@link #PROP_JSETTLERS_BOTS_BOTGAMES_TOTAL} is specified, waits briefly and then
-     * calls {@link #startRobotOnlyGames()}.
+     * calls {@link #startRobotOnlyGames(boolean)}.
+     *<P>
+     * Once this method completes, server begins its main loop of listening for incoming
+     * client connections, and starting a Thread for each one to handle that client's messages.
+     *
+     * @throws IllegalStateException If server was constructed in Utility Mode and shouldn't continue
+     *    normal startup; see {@link #hasUtilityModeProperty()} for details.
      * @since 1.1.09
      */
     @Override
     public void serverUp()
+        throws IllegalStateException
     {
+        if (hasUtilityModeProp)
+            throw new IllegalStateException();
+
         /**
          * If we have any STARTROBOTS, start them up now.
          * Each bot will have its own thread and {@link SOCRobotClient}.
@@ -1204,7 +1555,7 @@ public class SOCServer extends Server
     /**
      * Adds a connection to a game, unless they're already a member.
      * If the game doesn't yet exist, creates it and announces the new game to all clients
-     * by calling {@link #createGameAndBroadcast(StringConnection, String, Map, int)}.
+     * by calling {@link #createGameAndBroadcast(StringConnection, String, Map, int, boolean, boolean)}.
      *<P>
      * After this, human players are free to join, until someone clicks "Start Game".
      * At that point, server will look for robots to fill empty seats.
@@ -1640,10 +1991,10 @@ public class SOCServer extends Server
      * @param numFast number of fast robots, with {@link soc.robot.SOCRobotDM#FAST_STRATEGY FAST_STRATEGY}
      * @param numSmart number of smart robots, with {@link soc.robot.SOCRobotDM#SMART_STRATEGY SMART_STRATEGY}
      * @return True if robots were set up, false if an exception occurred.
-     *     This typically happens if a robot class, or SOCDisplaylessClient,
+     *     This typically happens if a robot class or SOCDisplaylessClient
      *     can't be loaded, due to packaging of the server-only JAR.
-     * @see #startPracticeGame()
-     * @see #startLocalTCPServer(int)
+     * @see soc.client.SOCPlayerClient#startPracticeGame()
+     * @see soc.client.SOCPlayerClient.GameAwtDisplay#startLocalTCPServer(int)
      * @see #startRobotOnlyGames(boolean)
      * @see SOCLocalRobotClient
      * @since 1.1.00
@@ -1705,7 +2056,7 @@ public class SOCServer extends Server
      * calling this method
      *<P>
      * Note that if this game had the {@link SOCGame#isBotsOnly} flag, and {@link #numRobotOnlyGamesRemaining} &gt; 0,
-     *  will call {@link #startRobotOnlyGames()}.
+     *  will call {@link #startRobotOnlyGames(boolean)}.
      *
      * @param gm  the name of the game
      * @see #destroyGameAndBroadcast(String, String)
@@ -1844,12 +2195,44 @@ public class SOCServer extends Server
     }
 
     /**
+     * True if the server was constructed in with a property or command line argument which is used
+     * to run the server in Utility Mode instead of Server Mode.  In Utility Mode the server reads
+     * its properties, initializes its database connection if any, and performs one task such as a
+     * password reset or table/index creation. It won't listen at a TCP port or start other threads.
+     *<P>
+     * Utility Mode may also set a status message, see {@link #getUtilityModeMessage()}.
+     *<P>
+     * The current Utility Mode properties/arguments are:
+     *<UL>
+     * <LI> {@link SOCDBHelper#PROP_JSETTLERS_DB_SCRIPT_SETUP} property
+     * <LI> {@code --pw-reset=username} argument
+     *</UL>
+     *
+     * @return  True if server was constructed with a Utility Mode property or command line argument
+     * @since 2.0.00
+     */
+    public final boolean hasUtilityModeProperty()
+    {
+        return hasUtilityModeProp;
+    }
+
+    /**
+     * If {@link #hasUtilityModeProperty()}, get the optional status message to print before exiting.
+     * @return  Optional status message, or {@code null}
+     * @since 2.0.00
+     */
+    public final String getUtilityModeMessage()
+    {
+         return utilityModeMessage;
+    }
+
+    /**
      * Given a StringManager (for a client's locale), return all known
      * game options, localizing the descriptive names if available.
      * @param loc  Client's locale for StringManager i18n lookups:
      *          <tt>smgr.get("gameopt." + {@link SOCVersionedItem#key SOCGameOption.key})</tt>
-     * @param updateStaticKnownOpts  If true, localize each {@link SOCVersionedItem#desc SOCGameOption.desc} in the static
-     *          set of known options used by {@link SOCGameOption#getOption(String, boolean)} and
+     * @param updateStaticKnownOpts  If true, localize each {@link SOCVersionedItem#getDesc() SOCGameOption.desc} in the
+     *          static set of known options used by {@link SOCGameOption#getOption(String, boolean)} and
      *          {@link SOCGameOption#getAllKnownOptions()}; for use only by client's practice-game server
      * @return  {@link SOCGameOption#getAllKnownOptions()}, with descriptions localized if available
      * @since 2.0.00
@@ -2147,7 +2530,7 @@ public class SOCServer extends Server
      * @param c   the player connection; if their version is 2.0.00 or newer,
      *            they will be sent {@link SOCGameServerText}, otherwise {@link SOCGameTextMsg}.
      *            Null {@code c} is ignored and not an error.
-     * @param ga  game name
+     * @param gaName  game name
      * @param key the message localization key, from {@link SOCStringManager#get(String)}, to look up and send text of
      * @since 2.0.00
      * @see #messageToPlayerKeyed(StringConnection, String, String, Object...)
@@ -2174,7 +2557,7 @@ public class SOCServer extends Server
      * @param c   the player connection; if their version is 2.0.00 or newer,
      *            they will be sent {@link SOCGameServerText}, otherwise {@link SOCGameTextMsg}.
      *            Null {@code c} is ignored and not an error.
-     * @param ga  game name
+     * @param gaName  game name
      * @param key the message localization key, from {@link SOCStringManager#get(String)}, to look up and send text of
      * @param args  Any parameters within {@code txt}'s placeholders
      * @since 2.0.00
@@ -2238,7 +2621,7 @@ public class SOCServer extends Server
      *            (See {@link #messageToGameUrgent(String, String)})
      * @see #messageToGame(String, String)
      * @see #messageToGameWithMon(String, SOCMessage)
-     * @see #messageToGameForVersions(String, int, int, SOCMessage, boolean)
+     * @see #messageToGameForVersions(SOCGame, int, int, SOCMessage, boolean)
      */
     public void messageToGame(String ga, SOCMessage mes)
     {
@@ -2335,7 +2718,91 @@ public class SOCServer extends Server
     }
 
     /**
-     * Send a localized {@link SOCServerGameText} game text message to a game.
+     * Send a game a message containing data fields and also a text field to be localized.
+     * Same as {@link #messageToGame(String, SOCMessage)} but calls each member connection's
+     * {@link StringConnection#getLocalized(String) c.getLocalized(key)} for the localized text to send.
+     *<P>
+     * <B>Locks:</B> If {@code takeMon} is true, takes and releases
+     * {@link SOCGameList#takeMonitorForGame(String) gameList.takeMonitorForGame(gameName)}.
+     * Otherwise call {@link SOCGameList#takeMonitorForGame(String) gameList.takeMonitorForGame(gameName)}
+     * before calling this method.
+     *
+     * @param ga  The game
+     * @param msg  The data message to be sent after localizing text.
+     *     This message's fields are not changed here, the localization results are not kept with {@code msg}.
+     * @param takeMon Should this method take and release game's monitor via
+     *     {@link SOCGameList#takeMonitorForGame(String) gameList.takeMonitorForGame(gameName)}?
+     *     True unless caller already holds that monitor.
+     * @see #messageToGameKeyed(SOCGame, boolean, String)
+     * @see #messageToGameKeyed(SOCGame, boolean, String, Object...)
+     * @since 2.0.00
+     */
+    public void messageToGameKeyedType(SOCGame ga, SOCKeyedMessage msg, final boolean takeMon)
+    {
+        // similar code as the two messageToGameKeyed methods;
+        // if you change code here, consider changing it there too
+
+        final boolean hasMultiLocales = ga.hasMultiLocales;
+        final String gaName = ga.getName();
+        boolean rsrcMissing = false;
+
+        if (takeMon)
+            gameList.takeMonitorForGame(gaName);
+
+        try
+        {
+            Vector<StringConnection> v = gameList.getMembers(gaName);
+
+            if (v != null)
+            {
+                Enumeration<StringConnection> menum = v.elements();
+
+                final String msgKey = msg.getKey();
+                String gameLocalMsg = null, localText = null, gameTxtLocale = null;
+                while (menum.hasMoreElements())
+                {
+                    StringConnection c = menum.nextElement();
+                    if (c == null)
+                        continue;
+
+                    final String cliLocale = c.getI18NLocale();
+                    if ((gameLocalMsg == null)
+                        || (hasMultiLocales
+                             && (  (cliLocale == null)
+                                   ? (gameTxtLocale != null)
+                                   : ! cliLocale.equals(gameTxtLocale)  )))
+                    {
+                        if (msgKey != null)
+                            try
+                            {
+                                localText = c.getLocalized(msgKey);
+                            } catch (MissingResourceException e) {
+                                localText = msgKey;  // fallback so data fields will still be sent
+                                rsrcMissing = true;
+                            }
+
+                        gameLocalMsg = msg.toCmd(localText);
+                        gameTxtLocale = cliLocale;
+                    }
+
+                    c.put(gameLocalMsg);
+                }
+
+                if (rsrcMissing)
+                    D.ebugPrintln("Missing string key in messageToGameKeyedType: " + msgKey);
+            }
+        }
+        catch (Throwable e)
+        {
+            D.ebugPrintStackTrace(e, "Exception in messageToGameKeyedType");
+        }
+
+        if (takeMon)
+            gameList.releaseMonitorForGame(gaName);
+    }
+
+    /**
+     * Send a localized {@link SOCGameServerText} game text message to a game.
      * Same as {@link #messageToGame(String, String)} but calls each member connection's
      * {@link StringConnection#getLocalized(String) c.getLocalized(key)} for the localized text to send.
      *<P>
@@ -2357,13 +2824,15 @@ public class SOCServer extends Server
      * @see #messageToGameKeyed(SOCGame, boolean, String, Object...)
      * @see #messageToGameKeyedSpecial(SOCGame, boolean, String, Object...)
      * @see #messageToGameKeyedSpecialExcept(SOCGame, boolean, StringConnection, String, Object...)
+     * @see #messageToGameKeyedType(SOCGame, SOCKeyedMessage, boolean)
      * @see #messageToGame(String, String)
      * @since 2.0.00
      */
     public void messageToGameKeyed(SOCGame ga, final boolean takeMon, final String key)
         throws MissingResourceException
     {
-        // same code as the other messageToGameKeyed, except for the call to cli.getKeyed;
+        // same code as the other messageToGameKeyed, except for the call to cli.getLocalized;
+        // messageToGameKeyedType is also very similar.
         // if you change code here, change it there too
 
         final boolean hasMultiLocales = ga.hasMultiLocales;
@@ -2440,13 +2909,15 @@ public class SOCServer extends Server
      * @see #messageToGameKeyed(SOCGame, boolean, String)
      * @see #messageToGameKeyedSpecial(SOCGame, boolean, String, Object...)
      * @see #messageToGameKeyedSpecialExcept(SOCGame, boolean, StringConnection, String, Object...)
+     * @see #messageToGameKeyedType(SOCGame, SOCKeyedMessage, boolean)
      * @see #messageToGame(String, String)
      * @since 2.0.00
      */
     public void messageToGameKeyed(SOCGame ga, final boolean takeMon, final String key, final Object ... params)
         throws MissingResourceException
     {
-        // same code as the other messageToGameKeyed, except for the call to cli.getKeyed;
+        // same code as the other messageToGameKeyed, except for the call to cli.getLocalized;
+        // messageToGameKeyedType is also very similar.
         // if you change code here, change it there too
 
         final boolean hasMultiLocales = ga.hasMultiLocales;
@@ -2718,7 +3189,7 @@ public class SOCServer extends Server
      * @param mes the message to send
      * @see #messageToGame(String, SOCMessage)
      * @see #messageToGameKeyed(SOCGame, boolean, String)
-     * @see #messageToGameForVersions(String, int, int, SOCMessage, boolean)
+     * @see #messageToGameForVersions(SOCGame, int, int, SOCMessage, boolean)
      */
     public void messageToGameWithMon(String ga, SOCMessage mes)
     {
@@ -2878,10 +3349,10 @@ public class SOCServer extends Server
      *                game's monitor via {@link SOCGameList#takeMonitorForGame(String)} ?
      *                If the game's clients are all older than <tt>vmin</tt> or
      *                newer than <tt>vmax</tt>, nothing happens and the monitor isn't taken.
-     * @since 2.0.00
+     * @since 1.1.19
      */
-    public void messageToGameForVersions
-        (SOCGame ga, final int vmin, final int vmax, SOCMessage mes, final boolean takeMon)
+    public final void messageToGameForVersions
+        (final SOCGame ga, final int vmin, final int vmax, final SOCMessage mes, final boolean takeMon)
     {
         messageToGameForVersionsExcept(ga, vmin, vmax, null, mes, takeMon);
     }
@@ -2900,11 +3371,12 @@ public class SOCServer extends Server
      *                game's monitor via {@link SOCGameList#takeMonitorForGame(String)} ?
      *                If the game's clients are all older than <tt>vmin</tt> or
      *                newer than <tt>vmax</tt>, nothing happens and the monitor isn't taken.
-     * @since 2.0.00
+     * @since 1.1.19
      * @see #messageToGameExcept(String, StringConnection, SOCMessage, boolean)
      */
-    public void messageToGameForVersionsExcept
-        (SOCGame ga, final int vmin, final int vmax, StringConnection ex, SOCMessage mes, final boolean takeMon)
+    public final void messageToGameForVersionsExcept
+        (final SOCGame ga, final int vmin, final int vmax, final StringConnection ex,
+         final SOCMessage mes, final boolean takeMon)
     {
         if ((ga.clientVersionLowest > vmax) || (ga.clientVersionHighest < vmin))
             return;  // <--- All clients too old or too new ---
@@ -2919,7 +3391,7 @@ public class SOCServer extends Server
             Vector<StringConnection> v = gameList.getMembers(gn);
             if (v != null)
             {
-                String mesCmd = null;  // will be mes.toCmd()
+                String mesCmd = null;  // lazy init, will be mes.toCmd()
                 Enumeration<StringConnection> menum = v.elements();
 
                 while (menum.hasMoreElements())
@@ -2929,13 +3401,13 @@ public class SOCServer extends Server
                         continue;
 
                     final int cv = con.getVersion();
-                    if ((cv >= vmin) && (cv <= vmax))
-                    {
-                        //currentGameEventRecord.addMessageOut(new SOCMessageRecord(mes, "SERVER", con.getData()));
-                        if (mesCmd == null)
-                            mesCmd = mes.toCmd();
-                        con.put(mesCmd);
-                    }
+                    if ((cv < vmin) || (cv > vmax))
+                        continue;
+
+                    //currentGameEventRecord.addMessageOut(new SOCMessageRecord(mes, "SERVER", con.getData()));
+                    if (mesCmd == null)
+                        mesCmd = mes.toCmd();
+                    con.put(mesCmd);
                 }
             }
         }
@@ -2954,7 +3426,7 @@ public class SOCServer extends Server
      * begins with ">>>"; the client should draw the user's
      * attention in some way.
      *<P>
-     * Like {@link #messageToGame(String, String)}, will take and release the game's monitor.
+     * <b>Locks:</b> Like {@link #messageToGame(String, String)}, will take and release the game's monitor.
      *
      * @param ga  the name of the game
      * @param mes the message to send. If mes does not begin with ">>>",
@@ -3087,7 +3559,7 @@ public class SOCServer extends Server
     }
 
     /**
-     * Send welcome messages (server version, and the lists of channels and games
+     * Send welcome messages (server version and features, and the lists of channels and games
      * ({@link SOCChannels}, {@link SOCGames})) when a new
      * connection comes, part 2 - c has been accepted and added to a connection list.
      * Unlike {@link #newConnection1(StringConnection)},
@@ -3105,7 +3577,14 @@ public class SOCServer extends Server
         c.setAppData(cdata);
 
         // VERSION of server
-        c.put(SOCVersion.toCmd(Version.versionNumber(), Version.version(), Version.buildnum(), null));
+        SOCServerFeatures feats = features;
+        if (acctsNotOpenRegButNoUsers)
+        {
+            feats = new SOCServerFeatures(features);
+            feats.add(SOCServerFeatures.FEAT_OPEN_REG);  // no accounts: don't require a password from SOCAccountClient
+        }
+        c.put(SOCVersion.toCmd
+            (Version.versionNumber(), Version.version(), Version.buildnum(), feats.getEncodedList()));
 
         // CHANNELS
         Vector<String> cl = new Vector<String>();
@@ -3152,8 +3631,16 @@ public class SOCServer extends Server
     /**
      * Name a current connection to the system, which may replace an older connection.
      * Call c.setData(name) just before calling this method.
-     * Calls {@link Server#nameConnection(StringConnection)}.
-     * Will then adjust game list/channel list if <tt>isReplacing</tt>.
+     * Calls {@link Server#nameConnection(StringConnection)} to move the connection
+     * from the unnamed to the named connection list.  Increments {@link #numberOfUsers}.
+     *<P>
+     * If {@code isReplacing}:
+     *<UL>
+     * <LI> Replaces the old connection with the new one in all its games and channels
+     * <LI> Calls {@link SOCClientData#copyClientPlayerStats(SOCClientData)}
+     *      for win/loss record and current game and channel count
+     * <LI> Sends the old connection an informational disconnect {@link SOCServerPing SOCServerPing(-1)}
+     *</UL>
      *
      * @param c  Connected client; its key data ({@link StringConnection#getData()}) must not be null
      * @param isReplacing  Are we replacing / taking over a current connection?
@@ -3193,6 +3680,8 @@ public class SOCServer extends Server
             if (oldConn.getVersion() >= 1108)
                 oldConn.put(SOCServerPing.toCmd(-1));
         }
+
+        numberOfUsers++;
     }
 
     /**
@@ -3612,17 +4101,27 @@ public class SOCServer extends Server
             {
                 if (mes instanceof SOCMessageForGame)
                 {
-                    final String gaName = ((SOCMessageForGame) mes).getGame(); 
-                    SOCGame ga = gameList.getGameData(gaName);
-                    if ((ga == null) || (c == null))
-                        return;  // <--- Early return: ignore unknown games ---
+                    // Try to process message through its game type's handler
+                    // before falling through to server-wide handler
 
-                    final GameHandler hand = gameList.getGameTypeHandler(gaName);
-                    if (hand != null)  // all consistent games will have a handler
+                    final String gaName = ((SOCMessageForGame) mes).getGame();
+                    if (gaName == null)
+                        return;  // <--- Early return: malformed ---
+
+                    if (! gaName.equals(SOCMessage.GAME_NONE))
                     {
-                        if (hand.processCommand(ga, (SOCMessageForGame) mes, c))
-                            return;
-                        // else: Message type unknown or ignored by handler. Server handles it below.
+                        SOCGame ga = gameList.getGameData(gaName);
+                        if ((ga == null) || (c == null))
+                            return;  // <--- Early return: ignore unknown games ---
+
+                        final GameHandler hand = gameList.getGameTypeHandler(gaName);
+                        if (hand != null)  // all consistent games will have a handler
+                        {
+                            if (hand.processCommand(ga, (SOCMessageForGame) mes, c))
+                                return;
+
+                            // else: Message type unknown or ignored by handler. Server handles it below.
+                        }
                     }
                 }
 
@@ -3643,7 +4142,14 @@ public class SOCServer extends Server
                     handleVERSION(c, (SOCVersion) mes);
 
                     break;
-                
+
+                /**
+                 * client's optional authentication request before creating a game (v1.1.19+)
+                 */
+                case SOCMessage.AUTHREQUEST:
+                    handleAUTHREQUEST(c, (SOCAuthRequest) mes);
+                    break;
+
                 /**
                  * "join a channel" message
                  */
@@ -3780,7 +4286,7 @@ public class SOCServer extends Server
 
                     //createNewGameEventRecord();
                     //currentGameEventRecord.setMessageIn(new SOCMessageRecord(mes, c.getData(), "SERVER"));
-                    handleSTARTGAME(c, (SOCStartGame) mes);
+                    handleSTARTGAME(c, (SOCStartGame) mes, 0);
 
                     //ga = (SOCGame)gamesData.get(((SOCStartGame)mes).getGame());
                     //currentGameEventRecord.setSnapshot(ga);
@@ -3812,6 +4318,14 @@ public class SOCServer extends Server
                     break;
 
                 /**
+                 * Handle client request for localized i18n strings for game items.
+                 * Added 2015-01-14 for v2.0.00.
+                 */
+                case SOCMessage.LOCALIZEDSTRINGS:
+                    handleLOCALIZEDSTRINGS(c, (SOCLocalizedStrings) mes);
+                    break;
+
+                /**
                  * Game option messages. For the best writeup of these messages' interaction with
                  * the client, see {@link soc.client.SOCPlayerClient.GameOptionServerSet}'s javadoc.
                  * Added 2009-06-01 for v1.1.07.
@@ -3827,6 +4341,14 @@ public class SOCServer extends Server
 
                 case SOCMessage.NEWGAMEWITHOPTIONSREQUEST:
                     handleNEWGAMEWITHOPTIONSREQUEST(c, (SOCNewGameWithOptionsRequest) mes);
+                    break;
+
+                /**
+                 * Client request for updated scenario info.
+                 * Added 2015-09-21 for v2.0.00.
+                 */
+                case SOCMessage.SCENARIOINFO:
+                    handleSCENARIOINFO(c, (SOCScenarioInfo) mes);
                     break;
 
                 }  // switch (mes.getType)
@@ -3858,6 +4380,7 @@ public class SOCServer extends Server
         "*KILLBOT*  botname  End a bot's connection",
         "*KILLGAME*  end the current game",
         "*RESETBOT* botname  End a bot's connection",
+        "*STARTBOTGAME* [maxBots]  Start this game (no humans have sat) with bots only",
         "*STATS*   server stats and current-game stats",
         "*STOP*  kill the server"
         };
@@ -3879,6 +4402,8 @@ public class SOCServer extends Server
      */
     public boolean processDebugCommand(StringConnection debugCli, String ga, final String dcmd, final String dcmdU)
     {
+        // See handleGAMETEXTMSG for "unprivileged" debug commands like *STATS* and *ADDTIME*.
+
         if (dcmdU.startsWith("*HELP"))
         {
             for (int i = 0; i < DEBUG_COMMANDS_HELP.length; ++i)
@@ -4013,6 +4538,36 @@ public class SOCServer extends Server
             if (! botFound)
                 D.ebugPrintln("L2614 Bot not found to disconnect: " + botName);
         }
+        else if (dcmdU.startsWith("*STARTBOTGAME*"))
+        {
+            if (0 == getConfigIntProperty(props, PROP_JSETTLERS_BOTS_BOTGAMES_TOTAL, 0))
+            {
+                messageToPlayer(debugCli, ga,
+                    "To start a bots-only game, must restart server with "
+                    + PROP_JSETTLERS_BOTS_BOTGAMES_TOTAL + " != 0.");
+                return true;
+            }
+
+            SOCGame gameObj = getGame(ga);
+            if (gameObj == null)
+                return true;  // we're sitting in this game, shouldn't happen
+            if (gameObj.getGameState() != SOCGame.NEW)
+            {
+                messageToPlayer(debugCli, ga, "This game has already started; you must create a new one.");
+                return true;
+            }
+
+            int maxBots = 0;
+            if (dcmdU.length() > 15)
+            {
+                try {
+                    maxBots = Integer.parseInt(dcmdU.substring(15).trim());
+                } catch (NumberFormatException e) {}
+            }
+
+            handleSTARTGAME(debugCli, new SOCStartGame(ga), maxBots);
+            return true;
+        }
         else
         {
             // See if game type's handler finds a debug command
@@ -4079,6 +4634,147 @@ public class SOCServer extends Server
     }
 
     /**
+     * Check that the username and password (if any) is okay: Length versus {@link #PLAYER_NAME_MAX_LENGTH}, name
+     * in use but not timed out versus takeover, etc. Calls {@link #checkNickname(String, StringConnection, boolean)}
+     * and {@link #authenticateUser(StringConnection, String, String)}.
+     *<P>
+     * If not okay, sends client a {@link SOCStatusMessage} with an appropriate status code.
+     *<P>
+     * If this user is already logged into another connection, checks here whether this new
+     * replacement connection can "take over" the existing one according to a timeout calculation
+     * in {@link #checkNickname(String, StringConnection, boolean)}.
+     *<P>
+     * If this connection isn't already logged on and named ({@link StringConnection#getData() c.getData()}
+     * == {@code null}) and all checks pass: Unless {@code doNameConnection} is false, calls
+     * {@link StringConnection#setData(Object) c.setData(msgUser)} and
+     * {@link #nameConnection(StringConnection, boolean) nameConnection(c, isTakingOver)} before
+     * returning {@link #AUTH_OR_REJECT__OK} or {@link #AUTH_OR_REJECT__TAKING_OVER}.
+     *<P>
+     * If this connection is already logged on and named ({@link StringConnection#getData() c.getData()} != {@code null}),
+     * does nothing.  Won't check username or password, just returns {@link #AUTH_OR_REJECT__OK}.
+     *
+     * @param c  Client's connection
+     * @param msgUser  Client username (nickname) to validate and authenticate
+     * @param msgPass  Password to supply to {@link #authenticateUser(StringConnection, String, String)},
+     *     or ""; please trim string before calling
+     * @param cliVers  Client version, from {@link StringConnection#getVersion()}
+     * @param doNameConnection  True if successful auth of an unnamed connection should have this method call
+     *     {@link StringConnection#setData(Object) c.setData(msgUser)} and
+     *     {@link #nameConnection(StringConnection, boolean) nameConnection(c, isTakingOver)}.
+     *     <P>
+     *     For the usual connect sequence, callers will want {@code true}.  Some callers might want to check
+     *     other things after this method and possibly reject the connection at that point; they will want
+     *     {@code false}. Those callers must remember to call {@code c.setData(msgUser)} and
+     *     <tt>nameConnection(c, (result == {@link #AUTH_OR_REJECT__TAKING_OVER}))</tt> themselves to finish
+     *     authenticating a connection.
+     * @param allowTakeover  True if the new connection can "take over" an older connection in response to the
+     *     message it sent.  If true, the caller must be prepared to send all game info/channel info that the
+     *     old connection had joined, so the new connection has full info to participate in them.
+     * @return  Result of the auth check: {@link #AUTH_OR_REJECT__FAILED},
+     *     {@link #AUTH_OR_REJECT__OK}, or (only if {@code allowTakeover}) {@link #AUTH_OR_REJECT__TAKING_OVER}
+     * @since 1.1.19
+     */
+    private int authOrRejectClientUser
+        (StringConnection c, final String msgUser, String msgPass, final int cliVers,
+         final boolean doNameConnection, final boolean allowTakeover)
+    {
+        if (c.getData() != null)
+        {
+            return AUTH_OR_REJECT__OK;  // <---- Early return: Already authenticated ----
+        }
+
+        boolean isTakingOver = false;  // will set true if a human player is replacing another player in the game
+
+        /**
+         * If connection doesn't already have a nickname, check that the nickname is ok
+         */
+        if (msgUser.length() > PLAYER_NAME_MAX_LENGTH)
+        {
+            c.put(SOCStatusMessage.toCmd
+                    (SOCStatusMessage.SV_NEWGAME_NAME_TOO_LONG, cliVers,
+                     SOCStatusMessage.MSG_SV_NEWGAME_NAME_TOO_LONG + Integer.toString(PLAYER_NAME_MAX_LENGTH)));
+            return AUTH_OR_REJECT__FAILED;
+        }
+
+        /**
+         * check if a nickname is okay, and, if they're already logged in,
+         * whether a new replacement connection can "take over" the existing one.
+         */
+        final int nameTimeout = checkNickname(msgUser, c, (msgPass != null) && (msgPass.trim().length() > 0));
+        System.err.println("L4910 past checkNickname at " + System.currentTimeMillis());
+
+        if (nameTimeout == -1)
+        {
+            if (allowTakeover)
+            {
+                isTakingOver = true;
+            } else {
+                c.put(SOCStatusMessage.toCmd
+                        (SOCStatusMessage.SV_NAME_IN_USE, cliVers,
+                         MSG_NICKNAME_ALREADY_IN_USE));
+                return AUTH_OR_REJECT__FAILED;
+            }
+        } else if (nameTimeout == -2)
+        {
+            c.put(SOCStatusMessage.toCmd
+                    (SOCStatusMessage.SV_NAME_IN_USE, cliVers,
+                     MSG_NICKNAME_ALREADY_IN_USE));
+            return AUTH_OR_REJECT__FAILED;
+        } else if (nameTimeout <= -1000)
+        {
+            c.put(SOCStatusMessage.toCmd
+                    (SOCStatusMessage.SV_NAME_IN_USE, cliVers,
+                     checkNickname_getVersionText(-nameTimeout)));
+            return AUTH_OR_REJECT__FAILED;
+        } else if (nameTimeout > 0)
+        {
+            c.put(SOCStatusMessage.toCmd
+                    (SOCStatusMessage.SV_NAME_IN_USE, cliVers,
+                     (allowTakeover) ? checkNickname_getRetryText(nameTimeout) : MSG_NICKNAME_ALREADY_IN_USE));
+            return AUTH_OR_REJECT__FAILED;
+        }
+
+        /**
+         * account and password required?
+         */
+        if (getConfigBoolProperty(props, PROP_JSETTLERS_ACCOUNTS_REQUIRED, false))
+        {
+            if (msgPass.length() == 0)
+            {
+                c.put(SOCStatusMessage.toCmd
+                        (((cliVers >= SOCAuthRequest.VERSION_FOR_AUTHREQUEST)
+                          ? SOCStatusMessage.SV_PW_REQUIRED
+                          : SOCStatusMessage.SV_PW_WRONG),
+                         cliVers, "This server requires user accounts and passwords."));
+                return AUTH_OR_REJECT__FAILED;
+            }
+
+            // Assert: msgPass isn't "".
+            // authenticateUser queries db and requires an account there when msgPass is not "".
+        }
+
+        /**
+         * password check new connection from database, if not done already and if possible
+         */
+        if (! authenticateUser(c, msgUser, msgPass))
+        {
+            return AUTH_OR_REJECT__FAILED;  // <---- Early return: Password auth failed ----
+        }
+
+        /**
+         * Now that everything's validated, name this connection/user/player.
+         * If isTakingOver, also copies their current game/channel count.
+         */
+        if (doNameConnection)
+        {
+            c.setData(msgUser);
+            nameConnection(c, isTakingOver);
+        }
+
+        return (isTakingOver) ? AUTH_OR_REJECT__TAKING_OVER : AUTH_OR_REJECT__OK;
+    }
+
+    /**
      * authenticate the user:
      * see if the user is in the db, if so then check the password.
      * if they're not in the db, but they supplied a password,
@@ -4090,7 +4786,7 @@ public class SOCServer extends Server
      * @param password  the user's password; trim before calling
      * @return true if the user has been authenticated
      */
-    private boolean authenticateUser(StringConnection c, String userName, String password)
+    private boolean authenticateUser(StringConnection c, final String userName, final String password)
     {
         String userPassword = null;
 
@@ -4107,27 +4803,27 @@ public class SOCServer extends Server
             return false;
         }
 
+        int replySV = 0;
         if (userPassword != null)
         {
-            if (!userPassword.equals(password))
-            {
-                c.put(SOCStatusMessage.toCmd
-                        (SOCStatusMessage.SV_PW_WRONG, c.getVersion(),
-                         "Incorrect password for '" + userName + "'."));
-
-                return false;
-            }
+            if (! userPassword.equals(password))
+                replySV = SOCStatusMessage.SV_PW_WRONG;
         }
-        else if (!password.equals(""))
+        else if (! password.equals(""))
         {
             // No password found in database.
             // (Or, no database connected.)
             // If they supplied a password, it won't work here.
 
-            c.put(SOCStatusMessage.toCmd
-                    (SOCStatusMessage.SV_NAME_NOT_FOUND, c.getVersion(),
-                     "No user with the nickname '" + userName + "' is registered with the system."));
+            replySV = SOCStatusMessage.SV_PW_WRONG;
+        }
 
+        if (replySV != 0)
+        {
+            final String txt  // I18N TODO: Check client; might already substitute text based on SV value
+                = /*I*/"Incorrect password for '" + userName + "'." /*18N*/;
+
+            c.put(SOCStatusMessage.toCmd(replySV, c.getVersion(), txt));
             return false;
         }
 
@@ -4169,14 +4865,14 @@ public class SOCServer extends Server
      * This is sent when the client asks (after VERSION) for {@link SOCGameOptionGetInfos GAMEOPTIONGETINFOS}.
      *
      * @param c  the connection that sent the message
-     * @param mes  the messsage
+     * @param mes  the message
      */
     private void handleVERSION(StringConnection c, SOCVersion mes)
     {
         if (c == null)
             return;
 
-        setClientVersSendGamesOrReject(c, mes.getVersionNumber(), mes.locale, true);
+        setClientVersSendGamesOrReject(c, mes.getVersionNumber(), mes.localeOrFeats, true);
     }
 
     /**
@@ -4189,6 +4885,10 @@ public class SOCServer extends Server
      * This is sent when the client asks (after VERSION) for {@link SOCGameOptionGetInfos GAMEOPTIONGETINFOS}.
      * Game options are sent after client version is known, so the list of
      * sent options is based on client version.
+     *<P>
+     *<B>I18N:</B> If client doesn't send a locale string, the default locale {@code en_US} is used.
+     * Robot clients will get the default locale and localeStr here, those will be cleared soon in
+     * {@link #handleIMAROBOT(StringConnection, SOCImARobot)}.
      *<P>
      *<b>Locks:</b> To set the version, will synchronize briefly on {@link Server#unnamedConns unnamedConns}.
      * If {@link StringConnection#getVersion() c.getVersion()} is already == cvers,
@@ -4312,7 +5012,7 @@ public class SOCServer extends Server
      * version 1.0.00 ({@link #CLI_VERSION_ASSUMED_GUESS}), disconnect if too low.
      *
      * @param c  the connection that sent the message
-     * @param mes  the messsage
+     * @param mes  the message
      */
     private void handleJOIN(StringConnection c, SOCJoin mes)
     {
@@ -4322,6 +5022,10 @@ public class SOCServer extends Server
         D.ebugPrintln("handleJOIN: " + mes);
 
         int cliVers = c.getVersion();
+        final String msgUser = mes.getNickname().trim();
+        String msgPass = mes.getPassword();
+        if (msgPass != null)
+            msgPass = msgPass.trim();
 
         /**
          * Check the reported version; if none, assume 1000 (1.0.00)
@@ -4334,54 +5038,11 @@ public class SOCServer extends Server
         }
 
         /**
-         * Check that the nickname is ok
+         * Check that the nickname is ok, check password if supplied; if not ok, sends a SOCStatusMessage.
          */
-        boolean isTakingOver = false;
-
-        final String msgUser = mes.getNickname().trim();
-        String msgPass = mes.getPassword();
-        if (msgPass != null)
-            msgPass = msgPass.trim();
-
-        if (c.getData() == null)
-        {
-            if (msgUser.length() > PLAYER_NAME_MAX_LENGTH)
-            {
-                c.put(SOCStatusMessage.toCmd
-                        (SOCStatusMessage.SV_NEWGAME_NAME_TOO_LONG, cliVers,
-                         SOCStatusMessage.MSG_SV_NEWGAME_NAME_TOO_LONG + Integer.toString(PLAYER_NAME_MAX_LENGTH)));
-                return;
-            }
-
-            final int nameTimeout = checkNickname(msgUser, c, (msgPass != null) && (msgPass.trim().length() > 0));
-            if (nameTimeout == -1)
-            {
-                isTakingOver = true;
-            } else if (nameTimeout == -2)
-            {
-                c.put(SOCStatusMessage.toCmd
-                        (SOCStatusMessage.SV_NAME_IN_USE, cliVers,
-                         MSG_NICKNAME_ALREADY_IN_USE));
-                return;
-            } else if (nameTimeout <= -1000)
-            {
-                c.put(SOCStatusMessage.toCmd
-                        (SOCStatusMessage.SV_NAME_IN_USE, cliVers,
-                         checkNickname_getVersionText(-nameTimeout)));
-                return;
-            } else if (nameTimeout > 0)
-            {
-                c.put(SOCStatusMessage.toCmd
-                        (SOCStatusMessage.SV_NAME_IN_USE, cliVers,
-                         checkNickname_getRetryText(nameTimeout)));
-                return;
-            }
-        }
-
-        if ((c.getData() == null) && (!authenticateUser(c, msgUser, msgPass)))
-        {
-            return;
-        }
+        final int authResult = authOrRejectClientUser(c, msgUser, msgPass, cliVers, true, false);
+        if (authResult == AUTH_OR_REJECT__FAILED)
+            return;  // <---- Early return ----
 
         /**
          * Check that the channel name is ok
@@ -4401,17 +5062,6 @@ public class SOCServer extends Server
               // "This game name is not permitted, please choose a different name."
 
               return;  // <---- Early return ----
-        }
-
-        /**
-         * Now that everything's validated, name this connection/user/player.
-         * If isTakingOver, also copies their current game/channel count.
-         */
-        if (c.getData() == null)
-        {
-            c.setData(msgUser);
-            nameConnection(c, isTakingOver);
-            numberOfUsers++;
         }
 
         /**
@@ -4498,7 +5148,7 @@ public class SOCServer extends Server
      * Handle the "leave a channel" message
      *
      * @param c  the connection that sent the message
-     * @param mes  the messsage
+     * @param mes  the message
      */
     private void handleLEAVE(StringConnection c, SOCLeave mes)
     {
@@ -4542,7 +5192,7 @@ public class SOCServer extends Server
      * {@link Server#cliConnDisconPrintsPending} so they won't be printed.
      *
      * @param c  the connection that sent the message
-     * @param mes  the messsage
+     * @param mes  the message
      */
     private void handleIMAROBOT(StringConnection c, SOCImARobot mes)
     {
@@ -4667,6 +5317,19 @@ public class SOCServer extends Server
     /**
      * Handle game text messages, including debug commands.
      * Was part of processCommand before 1.1.07.
+     *<P>
+     * Some commands are unprivileged and can be run by any client:
+     *<UL>
+     * <LI> *ADDTIME*
+     * <LI> *CHECKTIME*
+     * <LI> *VERSION*
+     * <LI> *STATS*
+     * <LI> *WHO*
+     *</UL>
+     * These commands are processed in this method.
+     * Others can be run only by certain users or when certain server flags are set.
+     * Those are processed in {@link #processDebugCommand(StringConnection, String, String, String)}.
+     *
      * @since 1.1.07
      */
     private void handleGAMETEXTMSG(StringConnection c, SOCGameTextMsg gameTextMsgMes)
@@ -4695,13 +5358,15 @@ public class SOCServer extends Server
             // add 30 minutes to the expiration time.  If this
             // changes to another timespan, please update the
             // warning text sent in checkForExpiredGames().
-            // Use ">>>" in messageToGame to mark as urgent.
+            // Use ">>>" in message text to mark as urgent.
             if (ga.isPractice)
             {
                 messageToGameUrgent(gaName, ">>> Practice games never expire.");
             } else {
                 ga.setExpiration(ga.getExpiration() + (30 * 60 * 1000));
-                messageToGameUrgent(gaName, ">>> This game will expire in " + ((ga.getExpiration() - System.currentTimeMillis()) / 60000) + " minutes.");
+                messageToPlayerKeyed(c, gaName, "stats.game.willexpire.urgent",
+                    Integer.valueOf((int) ((ga.getExpiration() - System.currentTimeMillis()) / 60000)));
+                    // ">>> This game will expire in 15 minutes."
             }
         }
 
@@ -4710,7 +5375,7 @@ public class SOCServer extends Server
         ///
         if (cmdTxtUC.startsWith("*CHECKTIME*"))
         {
-            processDebugCommand_checktime(c, gaName, ga);
+            processDebugCommand_gameStats(c, gaName, ga, true);
         }
         else if (cmdTxtUC.startsWith("*VERSION*"))
         {
@@ -4740,8 +5405,9 @@ public class SOCServer extends Server
             messageToPlayer(c, gaName, "> Games finished: " + numberOfGamesFinished);
             messageToPlayer(c, gaName, "> Total Memory: " + rt.totalMemory());
             messageToPlayer(c, gaName, "> Free Memory: " + rt.freeMemory());
+            final int vers = Version.versionNumber();
             messageToPlayer(c, gaName, "> Version: "
-                + Version.versionNumber() + " (" + Version.version() + ") build " + Version.buildnum());
+                + vers + " (" + Version.version() + ") build " + Version.buildnum());
 
             if (! clientPastVersionStats.isEmpty())
             {
@@ -4757,7 +5423,12 @@ public class SOCServer extends Server
                 }
             }
 
-            processDebugCommand_checktime(c, gaName, ga);
+            // show range of current game's member client versions if not server version (added to *STATS* in 1.1.19)
+            if ((ga.clientVersionLowest != vers) || (ga.clientVersionLowest != ga.clientVersionHighest))
+                messageToPlayer(c, gaName, "> This game's client versions: "
+                    + Version.version(ga.clientVersionLowest) + " - " + Version.version(ga.clientVersionHighest));
+
+            processDebugCommand_gameStats(c, gaName, ga, false);
         }
         else if (cmdTxtUC.startsWith("*WHO*"))
         {
@@ -4817,11 +5488,18 @@ public class SOCServer extends Server
     /**
      * Print time-remaining and other game stats.
      * Includes more detail beyond the end-game stats sent in {@link SOCGameHandler#sendGameStateOVER(SOCGame)}.
+     *<P>
+     * Before v2.0.00, this method was {@code processDebugCommand_checktime(..)}.
+     *
      * @param c  Client requesting the stats
+     * @param gaName  {@code gameData.getName()}
      * @param gameData  Game to print stats
+     * @param isCheckTime  True if called from *CHECKTIME* server command, false for *STATS*.
+     *     If true, mark text as urgent when sending remaining time before game expires.
      * @since 1.1.07
      */
-    private void processDebugCommand_checktime(StringConnection c, final String gaName, SOCGame gameData)
+    private void processDebugCommand_gameStats
+        (StringConnection c, final String gaName, SOCGame gameData, final boolean isCheckTime)
     {
         if (gameData == null)
             return;
@@ -4849,10 +5527,75 @@ public class SOCServer extends Server
 
         if (! gameData.isPractice)   // practice games don't expire
         {
+            // If isCheckTime, use ">>>" in message text to mark as urgent:
             // ">>> This game will expire in 15 minutes."
-            messageToPlayerKeyed(c, gaName, "stats.game.willexpire",
+            messageToPlayerKeyed(c, gaName,
+                ((isCheckTime) ? "stats.game.willexpire.urgent" : "stats.game.willexpire"),
                 Integer.valueOf((int) ((gameData.getExpiration() - System.currentTimeMillis()) / 60000)));
         }
+    }
+
+    /**
+     * Handle the optional {@link SOCAuthRequest "authentication request"} message.
+     *<P>
+     * If {@link StringConnection#getData() c.getData()} != {@code null}, the client already authenticated and
+     * this method replies with {@link SOCStatusMessage#SV_OK} without checking the password in this message.
+     *
+     * @param c  the connection that sent the message
+     * @param mes  the message
+     * @since 1.1.19
+     */
+    private void handleAUTHREQUEST(StringConnection c, final SOCAuthRequest mes)
+    {
+        if (c == null)
+            return;
+
+        if (c.getData() == null)
+        {
+            final int cliVersion = c.getVersion();
+            if (cliVersion <= 0)
+            {
+                // unlikely: AUTHREQUEST was added in 1.1.19, version message timing was stable years earlier
+                c.put(SOCStatusMessage.toCmd
+                        (SOCStatusMessage.SV_NOT_OK_GENERIC, "AUTHREQUEST: Send version first"));  // I18N OK: rare error
+                return;
+            }
+
+            if (mes.authScheme != SOCAuthRequest.SCHEME_CLIENT_PLAINTEXT)
+            {
+                c.put(SOCStatusMessage.toCmd
+                        (SOCStatusMessage.SV_NOT_OK_GENERIC, "AUTHREQUEST: Auth scheme unknown: " + mes.authScheme));
+                        // I18N OK: rare error
+                return;
+            }
+
+            // Check user authentication.  Don't call setData or nameConnection yet, in case
+            // of role-specific things to check and reject during this initial connection.
+            final int authResult = authOrRejectClientUser(c, mes.nickname, mes.password, cliVersion, false, false);
+
+            if (authResult == AUTH_OR_REJECT__FAILED)
+                return;  // <---- Early return; authOrRejectClientUser sent the status message ----
+
+            if (mes.role.equals(SOCAuthRequest.ROLE_USER_ADMIN))
+            {
+                // Check if we're using a user admin whitelist; this check is also in handleCREATEACCOUNT.
+                if ((databaseUserAdmins != null) && ! databaseUserAdmins.contains(mes.nickname))
+                {
+                    c.put(SOCStatusMessage.toCmd
+                            (SOCStatusMessage.SV_ACCT_NOT_CREATED_DENIED, cliVersion,
+                             c.getLocalized("account.create.not_auth")));
+                                // "Your account is not authorized to create accounts."
+                    return;
+                }
+            }
+
+            // no role-specific problems: complete the authentication
+            c.setData(mes.nickname);
+            nameConnection(c, false);
+        }
+
+        c.put(SOCStatusMessage.toCmd
+                (SOCStatusMessage.SV_OK, c.getLocalized("member.welcome")));  // "Welcome to Java Settlers of Catan!"
     }
 
     /**
@@ -4864,7 +5607,7 @@ public class SOCServer extends Server
      * If the client is too old to join a specific game, return a STATUSMESSAGE. (since 1.1.06)
      *
      * @param c  the connection that sent the message
-     * @param mes  the messsage
+     * @param mes  the message
      */
     private void handleJOINGAME(StringConnection c, SOCJoinGame mes)
     {
@@ -4942,60 +5685,16 @@ public class SOCServer extends Server
         System.err.println("L4885 createOrJoinGameIfUserOK at " + System.currentTimeMillis());
         if (msgPass != null)
             msgPass = msgPass.trim();
-
-        /**
-         * Check that the nickname is ok
-         */
         final int cliVers = c.getVersion();
-        boolean isTakingOver = false;  // true if a human player is replacing another player in the game
-        if (c.getData() == null)
-        {
-            if (msgUser.length() > PLAYER_NAME_MAX_LENGTH)
-            {
-                c.put(SOCStatusMessage.toCmd
-                        (SOCStatusMessage.SV_NEWGAME_NAME_TOO_LONG, cliVers,
-                         SOCStatusMessage.MSG_SV_NEWGAME_NAME_TOO_LONG + Integer.toString(PLAYER_NAME_MAX_LENGTH)));
-                return;
-            }
-
-            /**
-             * check if a nickname is okay, and, if they're already logged in,
-             * whether a new replacement connection can "take over" the existing one.
-             */
-            final int nameTimeout = checkNickname(msgUser, c, (msgPass != null) && (msgPass.trim().length() > 0));
-            System.err.println("L4910 past checkNickname at " + System.currentTimeMillis());
-
-            if (nameTimeout == -1)
-            {
-                isTakingOver = true;
-            } else if (nameTimeout == -2)
-            {
-                c.put(SOCStatusMessage.toCmd
-                        (SOCStatusMessage.SV_NAME_IN_USE, cliVers,
-                         MSG_NICKNAME_ALREADY_IN_USE));
-                return;
-            } else if (nameTimeout <= -1000)
-            {
-                c.put(SOCStatusMessage.toCmd
-                        (SOCStatusMessage.SV_NAME_IN_USE, cliVers,
-                         checkNickname_getVersionText(-nameTimeout)));
-                return;
-            } else if (nameTimeout > 0)
-            {
-                c.put(SOCStatusMessage.toCmd
-                        (SOCStatusMessage.SV_NAME_IN_USE, cliVers,
-                         checkNickname_getRetryText(nameTimeout)));
-                return;
-            }
-        }
 
         /**
-         * password check new connection from database, if possible
+         * Check that the nickname is ok, check password if supplied; if not ok, sends a SOCStatusMessage.
          */
-        if ((c.getData() == null) && (!authenticateUser(c, msgUser, msgPass)))
-        {
-            return;  // <---- Early return: Password auth failed ----
-        }
+        final int authResult = authOrRejectClientUser(c, msgUser, msgPass, cliVers, true, true);
+        if (authResult == AUTH_OR_REJECT__FAILED)
+            return;  // <---- Early return ----
+
+        final boolean isTakingOver = (authResult == AUTH_OR_REJECT__TAKING_OVER);
 
         /**
          * Check that the game name is ok
@@ -5018,18 +5717,8 @@ public class SOCServer extends Server
 
             return;  // <---- Early return ----
         }
-        System.err.println("L4965 past user,pw check at " + System.currentTimeMillis());
 
-        /**
-         * Now that everything's validated, name this connection/user/player.
-         * If isTakingOver, also copies their current game/channel count.
-         */
-        if (c.getData() == null)
-        {
-            c.setData(msgUser);
-            nameConnection(c, isTakingOver);
-            numberOfUsers++;
-        }
+        System.err.println("L4965 past user,pw check at " + System.currentTimeMillis());
 
         /**
          * If creating a new game, ensure they are below their max game count.
@@ -5068,7 +5757,7 @@ public class SOCServer extends Server
 
             // Make sure all options are known.  If has game opt "SC" for scenarios,
             // also adds that scenario's options into gameOpts.
-            final StringBuffer optProblems = SOCGameOption.adjustOptionsToKnown(gameOpts, null, true);
+            final StringBuilder optProblems = SOCGameOption.adjustOptionsToKnown(gameOpts, null, true);
             if (optProblems != null)
             {
                 c.put(SOCStatusMessage.toCmd
@@ -5106,7 +5795,7 @@ public class SOCServer extends Server
                 if (allConnGames.size() == 0)
                 {
                     c.put(SOCStatusMessage.toCmd(SOCStatusMessage.SV_OK,
-                            "You've taken over the connection, but aren't in any games."));
+                            /*I*/"You've taken over the connection, but aren't in any games."/*18N*/ ));
                 } else {
                     // Send list backwards: requested game will be sent last.
                     for (int i = allConnGames.size() - 1; i >= 0; --i)
@@ -5186,7 +5875,7 @@ public class SOCServer extends Server
 
             System.out.println("Started bot-only game: " + gaName);
             newGame.setGameState(SOCGame.READY);
-            readyGameAskRobotsJoin(newGame, null);
+            readyGameAskRobotsJoin(newGame, null, 0);
         } else {
             // TODO game name existed
         }
@@ -5196,7 +5885,7 @@ public class SOCServer extends Server
      * Handle the "leave game" message
      *
      * @param c  the connection that sent the message
-     * @param mes  the messsage
+     * @param mes  the message
      */
     private void handleLEAVEGAME(StringConnection c, SOCLeaveGame mes)
     {
@@ -5346,7 +6035,7 @@ public class SOCServer extends Server
      * handle "sit down" message
      *
      * @param c  the connection that sent the message
-     * @param mes  the messsage
+     * @param mes  the message
      */
     private void handleSITDOWN(StringConnection c, SOCSitDown mes)
     {
@@ -5474,16 +6163,23 @@ public class SOCServer extends Server
 
     /**
      * handle "start game" message.  Game state must be NEW, or this message is ignored.
-     * {@link #readyGameAskRobotsJoin(SOCGame, StringConnection[]) Ask some robots} to fill
+     * {@link #readyGameAskRobotsJoin(SOCGame, StringConnection[], int) Ask some robots} to fill
      * empty seats, or {@link GameHandler#startGame(SOCGame) begin the game} if no robots needed.
      *<P>
      * Called when clients have sat at a new game and a client asks to start it,
      * not called during game board reset.
+     *<P>
+     * For robot debugging, a client can start and observe a robots-only game if the
+     * {@link #PROP_JSETTLERS_BOTS_BOTGAMES_TOTAL} property != 0 (including &lt; 0).
      *
      * @param c  the connection that sent the message
-     * @param mes  the messsage
+     * @param mes  the message
+     * @param botsOnly_maxBots  For bot debugging, maximum number of bots to add to the game,
+     *     or 0 to fill all empty seats. This parameter is used only when requesting a new
+     *     robots-only game using the *STARTBOTGAME* debug command; ignored otherwise.
      */
-    private void handleSTARTGAME(StringConnection c, final SOCStartGame mes)
+    private void handleSTARTGAME
+        (StringConnection c, final SOCStartGame mes, final int botsOnly_maxBots)
     {
         final String gn = mes.getGame();
         SOCGame ga = gameList.getGameData(gn);
@@ -5496,6 +6192,7 @@ public class SOCServer extends Server
         {
             if (ga.getGameState() == SOCGame.NEW)
             {
+                boolean allowStart = true;
                 boolean seatsFull = true;
                 boolean anyLocked = false;
                 int numEmpty = 0;
@@ -5537,16 +6234,33 @@ public class SOCServer extends Server
                     }
                 }
 
+                if (numPlayers == 0)
+                {
+                    // No one has sat, human client who requested STARTGAME is an observer.
+                    // Is server configured for robot-only games?  Prop's value can be < 0
+                    // to allow this without creating bots-only games at startup.
+
+                    if (0 == getConfigIntProperty(props, PROP_JSETTLERS_BOTS_BOTGAMES_TOTAL, 0))
+                    {
+                        allowStart = false;
+                        messageToGameKeyed(ga, true, "start.player.must.sit");
+                            // "To start the game, at least one player must sit down."
+                    } else {
+                        if ((botsOnly_maxBots != 0) && (botsOnly_maxBots < numEmpty))
+                            numEmpty = botsOnly_maxBots;
+                    }
+                }
+
                 if (seatsFull && (numPlayers < 2))
                 {
                     // Don't start the game; client must have more humans sit or unlock some seats for bots.
 
-                    seatsFull = false;  // must be true to start game
+                    allowStart = false;
                     numEmpty = 3;
                     messageToGameKeyed(ga, true, "start.only.cannot.lock.all");
                         // "The only player cannot lock all seats. To start the game, other players or robots must join."
                 }
-                else if (! seatsFull)
+                else if (allowStart && ! seatsFull)
                 {
                     // Look for some bots, set seatsFull if we find them
 
@@ -5586,7 +6300,7 @@ public class SOCServer extends Server
                              */
                             try
                             {
-                                readyGameAskRobotsJoin(ga, null);
+                                readyGameAskRobotsJoin(ga, null, numEmpty);
                             }
                             catch (IllegalStateException e)
                             {
@@ -5594,7 +6308,7 @@ public class SOCServer extends Server
 
                                 // recover, so that human players can still start a game
                                 ga.setGameState(SOCGame.NEW);
-                                seatsFull = false;
+                                allowStart = false;
 
                                 gameList.takeMonitorForGame(gn);
                                 messageToGameKeyed(ga, false, "start.robots.cannot.join.problem", e.getMessage());
@@ -5611,7 +6325,7 @@ public class SOCServer extends Server
                  * If this doesn't need robots, then start the game.
                  * Otherwise wait for them to sit before starting the game.
                  */
-                if (seatsFull)
+                if (seatsFull && allowStart)
                 {
                     GameHandler hand = gameList.getGameTypeHandler(gn);
                     if (hand != null)
@@ -5647,6 +6361,7 @@ public class SOCServer extends Server
      *                   Any vacant non-locked seat, with index i,
      *                   is filled with the robot whose connection is robotSeats[i].
      *                   Other indexes should be null, and won't be used.
+     * @param maxBots Maximum number of bots to add, or 0 to fill all empty seats
      *
      * @throws IllegalStateException if {@link SOCGame#getGameState() ga.gamestate} is not READY,
      *         or if {@link SOCGame#getClientVersionMinRequired() ga.version} is
@@ -5654,7 +6369,7 @@ public class SOCServer extends Server
      * @throws IllegalArgumentException if robotSeats is not null but wrong length,
      *           or if a robotSeat element is null but that seat wants a robot (vacant non-locked).
      */
-    private void readyGameAskRobotsJoin(SOCGame ga, StringConnection[] robotSeats)
+    private void readyGameAskRobotsJoin(SOCGame ga, StringConnection[] robotSeats, final int maxBots)
         throws IllegalStateException, IllegalArgumentException
     {
         if (ga.getGameState() != SOCGame.READY)
@@ -5682,6 +6397,9 @@ public class SOCServer extends Server
         final String gname = ga.getName();
         final Map<String, SOCGameOption> gopts = ga.getGameOptions();
         int seatsOpen = ga.getAvailableSeatCount();
+        if ((maxBots > 0) && (maxBots < seatsOpen))
+            seatsOpen = maxBots;
+
         int idx = 0;
         StringConnection[] robotSeatsConns = new StringConnection[ga.maxPlayers];
 
@@ -5742,7 +6460,7 @@ public class SOCServer extends Server
      * @param message  "no player gets anything" string
      * @since 2.0.00
      */
-    private void debug_printPieceDiceNumbers(SOCGame ga, String message)
+    void debug_printPieceDiceNumbers(SOCGame ga, String message)
     {
         final int roll = ga.getCurrentDice();
         final SOCBoard board = ga.getBoard();
@@ -6085,13 +6803,177 @@ public class SOCServer extends Server
     }
 
     /**
+     * Does this client's locale have localized {@link SOCScenario} names and descriptions?
+     * Checks these conditions:
+     * <UL>
+     *  <LI> {@link SOCClientData#wantsI18N c.scd.wantsI18N} flag is set:
+     *      Has locale, new-enough version, has requested I18N strings (see that flag's javadocs).
+     *  <LI> {@link StringConnection#getLocalized(String) c.getLocalized}({@code "gamescen.SC_WOND.n"})
+     *      returns a string different than {@link #i18n_scenario_SC_WOND_desc}:
+     *      This checks whether a fallback is being used because the client's locale has no scenario strings
+     * </UL>
+     * @param c  Client connection
+     * @return  True if the client meets all the conditions listed above, false otherwise
+     * @since 2.0.00
+     */
+    public static final boolean clientHasLocalizedStrs_gameScenarios(final StringConnection c)
+    {
+        final SOCClientData scd = (SOCClientData) c.getAppData();
+        return
+            scd.wantsI18N
+            && ! i18n_scenario_SC_WOND_desc.equals(c.getLocalized("gamescen.SC_WOND.n"));
+    }
+
+    /**
+     * Get localized strings for known {@link SOCScenario}s.  Assumes client locale has scenario strings:
+     * Call {@link #clientHasLocalizedStrs_gameScenarios(StringConnection)} before calling this method.
+     * Fills and returns a list with each {@code scKeys} key, scenario name, scenario description
+     * from {@code c.getLocalized("gamescen." + scKey + ".n")} and {@code ("gamescen." + scKey + ".d")}.
+     *
+     * @param loc  Client's locale for StringManager i18n lookups.  This is passed instead of the client connection
+     *    to simplify SOCPlayerClient's localizations before starting its practice server.
+     * @param scKeys  Scenario keynames to localize, such as a {@link List} of keynames or the {@link Set}
+     *    returned from {@link SOCScenario#getAllKnownScenarioKeynames()}.
+     *    {@code null} to use {@link SOCScenario#getAllKnownScenarioKeynames()}.
+     * @param checkUnknowns_skipFirst  Switch to allow calling this method from multiple places:
+     *    <UL>
+     *    <LI> If false, assumes {@code scKeys} has no unknown keys, will not call
+     *         {@link SOCScenario#getScenario(String)} to verify them.
+     *         {@code scKeys} could be {@link SOCScenario#getAllKnownScenarioKeynames()}, for example.
+     *         The localized strings for each scKey are looked up and added to the list if found.
+     *         If any {@code scKey} is missing localized string(s), that key won't be in the returned list.
+     *    <LI> If true, assumes {@code scKeys} is a {@link List} of keys from a client, and may have
+     *         scenario names unknown at this server version. Will ignore the first entry because in the
+     *         client message, the first list entry isn't a scenario key.  Will call
+     *         {@link SOCScenario#getScenario(String)} on each key to verify it exists.  The localized strings
+     *         for each known scKey are looked up and added to the list.  If the scenario is unknown or its
+     *         strings aren't localized, the key and {@link SOCLocalizedStrings#MARKER_KEY_UNKNOWN} are added instead.
+     *    </UL>
+     * @param scd  Optional client data to track which scenario strings are sent to client, or {@code null}.
+     *    This method will update {@link SOCClientData#scenariosInfoSent scd.scenariosInfoSent}.
+     * @return  Localized string list, may be empty but will never be null, in same format as the message returned
+     *    from server to client: Scenario keys with localized strings have 3 consecutive entries in the list:
+     *    Key, name, description.  If {@code checkUnknowns_skipFirst}, unknown scenarios have 2 consecutive entries
+     *    in the list: Key, {@link SOCLocalizedStrings#MARKER_KEY_UNKNOWN}.
+     * @since 2.0.00
+     */
+    public static List<String> localizeGameScenarios
+        (final Locale loc, Collection<String> scKeys, final boolean checkUnknowns_skipFirst, final SOCClientData scd)
+    {
+        if (scKeys == null)
+            scKeys = SOCScenario.getAllKnownScenarioKeynames();
+
+        final SOCStringManager sm = SOCStringManager.getServerManagerForClient(loc);
+        // No need to check hasLocalDescs = ! i18n_gameopt_PL_desc.equals(sm.get("gamescen.SC_WOND.n"))
+        // because caller has done so
+
+        Map<String, String> scensSent;  // for optional tracking
+        if (scd != null)
+        {
+            scensSent = scd.scenariosInfoSent;
+            if (scensSent == null)
+            {
+                scensSent = new HashMap<String, String>();
+                scd.scenariosInfoSent = scensSent;
+            }
+        } else {
+            scensSent = null;
+        }
+
+        List<String> rets = new ArrayList<String>();  // for reply to client
+
+        boolean skippedAlready = ! checkUnknowns_skipFirst;
+        for (final String scKey : scKeys)
+        {
+            if (! skippedAlready)
+            {
+                skippedAlready = true;
+                continue;  // assumes scKeys is a List
+            }
+
+            if ((scensSent != null) && ! scensSent.containsKey(scKey))
+                scensSent.put(scKey, SOCClientData.SENT_SCEN_STRINGS);
+
+            String nm = null, desc = null;
+
+            if (! (checkUnknowns_skipFirst && (SOCScenario.getScenario(scKey) == null)))
+            {
+                try { nm = sm.get("gamescen." + scKey + ".n"); }
+                catch (MissingResourceException e) {}
+
+                try { desc = sm.get("gamescen." + scKey + ".d"); }
+                catch (MissingResourceException e) {}
+            }
+
+            if (nm != null)
+            {
+                rets.add(scKey);
+                rets.add(nm);
+                rets.add(desc);  // null is OK
+            } else if (checkUnknowns_skipFirst) {
+                rets.add(scKey);
+                rets.add(SOCLocalizedStrings.MARKER_KEY_UNKNOWN);
+            }
+            // else localized not found, and not checkUnknowns_skipFirst: leave scKey out of rets entirely
+        }
+
+        return rets;
+    }
+
+    /**
+     * Handle client request for localized i18n strings for game items.
+     * Added 2015-01-14 for v2.0.00.
+     */
+    private void handleLOCALIZEDSTRINGS(final StringConnection c, final SOCLocalizedStrings mes)
+    {
+        final List<String> str = mes.getParams();
+        final String type = str.get(0);
+        List<String> rets = null;  // for reply to client; built in localizeGameScenarios or other type-specific method
+        int flags = 0;
+
+        if (type.equals(SOCLocalizedStrings.TYPE_GAMEOPT))
+        {
+            // Already handled when client connects
+            flags = SOCLocalizedStrings.FLAG_SENT_ALL;
+        }
+        else if (type.equals(SOCLocalizedStrings.TYPE_SCENARIO))
+        {
+            // Handle individual scenario keys; ignores FLAG_REQ_ALL
+
+            final SOCClientData scd = (SOCClientData) c.getAppData();
+            if (clientHasLocalizedStrs_gameScenarios(c))
+            {
+                rets = localizeGameScenarios(scd.locale, str, true, scd);
+            } else {
+                flags = SOCLocalizedStrings.FLAG_SENT_ALL;
+                scd.sentAllScenarioStrings = true;
+            }
+        }
+        else
+        {
+            // Unrecognized string type
+            flags = SOCLocalizedStrings.FLAG_TYPE_UNKNOWN;
+        }
+
+        if (rets == null)
+            rets = new ArrayList<String>();
+        c.put(SOCLocalizedStrings.toCmd(type, flags, rets));
+    }
+
+    /**
      * process the "game option get defaults" message.
+     * User has clicked the "New Game" button for the first time, client needs {@link SOCGameOption} values.
      * Responds to client by sending {@link SOCGameOptionGetDefaults GAMEOPTIONGETDEFAULTS}.
      * All of server's known options are sent, except empty string-valued options.
      * Depending on client version, server's response may include option names that
      * the client is too old to use; the client is able to ignore them.
      * If the client is older than {@link SOCGameOption#VERSION_FOR_LONGER_OPTNAMES},
      * options with long names won't be sent.
+     *<P>
+     * <B>I18N:</B> Since the New Game dialog will need localized strings for {@link SOCScenario}s,
+     * v2.0.00 sends those strings before the game option default values, so the client will have them
+     * before showing the dialog.
+     *
      * @param c  the connection
      * @param mes  the message
      * @since 1.1.07
@@ -6100,6 +6982,7 @@ public class SOCServer extends Server
     {
         if (c == null)
             return;
+
         final boolean hideLongNameOpts = (c.getVersion() < SOCGameOption.VERSION_FOR_LONGER_OPTNAMES);
         c.put(SOCGameOptionGetDefaults.toCmd
               (SOCGameOption.packKnownOptionsToString(true, hideLongNameOpts)));
@@ -6128,14 +7011,17 @@ public class SOCServer extends Server
             return;
 
         final int cliVers = c.getVersion();
+        final SOCClientData scd = (SOCClientData) c.getAppData();
         boolean alreadyTrimmedEnums = false;
         Vector<String> okeys = mes.getOptionKeys();
         List<SOCGameOption> opts = null;
 
         // check for request for i18n localized descriptions (client v2.0.00 or newer);
         // if we don't have game opt localization for client's locale, ignore the request.
+        if (mes.hasTokenGetI18nDescs() && (c.getI18NLocale() != null))
+            scd.wantsI18N = true;
         final boolean wantsLocalDescs =
-            mes.hasTokenGetI18nDescs() && (c.getI18NLocale() != null)
+            scd.wantsI18N
             && ! i18n_gameopt_PL_desc.equals(c.getLocalized("gameopt.PL"));
 
         if (okeys == null)
@@ -6250,6 +7136,258 @@ public class SOCServer extends Server
     }
 
     /**
+     * Process client request for updated {@link SOCScenario} info.
+     * Added 2015-09-21 for v2.0.00.
+     */
+    private void handleSCENARIOINFO(final StringConnection c, final SOCScenarioInfo mes)
+    {
+        if (c == null)
+            return;
+
+        List<String> params = mes.getParams();
+        int L = params.size();
+        if (L == 0)
+            return;  // malformed
+
+        final boolean hasAnyChangedMarker = params.get(L - 1).equals(SOCScenarioInfo.MARKER_ANY_CHANGED);
+        if (hasAnyChangedMarker)
+        {
+            params.remove(L - 1);
+            --L;
+        }
+        else if (L == 1)
+        {
+            // requesting one scenario
+            sendGameScenarioInfo(params.get(0), null, c, false);
+            return;
+        }
+
+        // Calculate and respond; be sure to include any requested scKeys from params
+
+        final int cliVers = c.getVersion();
+        Map<String, SOCScenario> knownScens = null;  // caches SOCScenario.getAllKnownScenarios() if called
+
+        List<SOCScenario> changes = null;
+        if (hasAnyChangedMarker && (cliVers < Version.versionNumber()))
+        {
+            knownScens = SOCScenario.getAllKnownScenarios();
+            changes = SOCVersionedItem.itemsNewerThanVersion
+                (cliVers, false, knownScens);
+        }
+
+        if (L > 0)
+        {
+            if (changes == null)
+                changes = new ArrayList<SOCScenario>();
+
+            for (String scKey : params)
+            {
+                SOCScenario sc = SOCScenario.getScenario(scKey);
+                if ((sc == null) || (sc.minVersion > cliVers))
+                    // unknown scenario, or too new; send too-new ones in case client encounters one as a listed game's
+                    // scenario (server also sends too-new SOCGameOptions as unknowns, with the same intention)
+                    c.put(new SOCScenarioInfo(scKey, true).toCmd());
+                else if (! changes.contains(sc))
+                    changes.add(sc);
+            }
+        }
+
+        if (changes != null)
+            for (final SOCScenario sc : changes)
+                if (sc.minVersion <= cliVers)
+                    sendGameScenarioInfo(null, sc, c, false);
+                else
+                    c.put(new SOCScenarioInfo(sc.key, true).toCmd());
+
+        final SOCClientData scd = (SOCClientData) c.getAppData();
+
+        if (hasAnyChangedMarker && scd.wantsI18N && ! scd.sentAllScenarioStrings)
+        {
+            // if available send each scenario's localized strings, unless we've already sent its full info
+
+            if (! scd.checkedLocaleScenStrings)
+            {
+                scd.localeHasScenStrings = clientHasLocalizedStrs_gameScenarios(c);
+                scd.checkedLocaleScenStrings = true;
+            }
+
+            if (scd.localeHasScenStrings)
+            {
+                if (knownScens == null)
+                    knownScens = SOCScenario.getAllKnownScenarios();
+
+                ArrayList<String> scKeys = new ArrayList<String>();
+                for (final SOCScenario sc : SOCVersionedItem.itemsForVersion(cliVers, knownScens))
+                    if ((changes == null) || ! changes.contains(sc))
+                        scKeys.add(sc.key);
+
+                List<String> scenStrs;
+                if (! scKeys.isEmpty())
+                    scenStrs = localizeGameScenarios(scd.locale, scKeys, false, scd);
+                else
+                    scenStrs = scKeys;  // re-use the empty list object
+
+                c.put(SOCLocalizedStrings.toCmd
+                        (SOCLocalizedStrings.TYPE_SCENARIO, SOCLocalizedStrings.FLAG_SENT_ALL, scenStrs));
+            }
+
+            scd.sentAllScenarioStrings = true;
+        }
+
+        c.put(new SOCScenarioInfo(null, null, null).toCmd());  // send end of list
+
+        if (hasAnyChangedMarker)
+        {
+            scd.sentAllScenarioInfo = true;
+            scd.sentAllScenarioStrings = true;
+        }
+    }
+
+    /**
+     * If needed, send this scenario's updated info and i18n localized short/long description strings to the client.
+     * Checks whether the scenario has been added or changed since the client's version,
+     * whether the scenario has strings in the client's locale, and whether the client has
+     * already been sent this scenario's info or strings.
+     *<P>
+     * Sends nothing if {@code scKey} and {@code sc} are both null.
+     * Sends nothing if client's version is older than 2.0.00 ({@link SOCScenario#VERSION_FOR_SCENARIOS}).
+     * Will not send localized strings if locale is null.
+     * Checks and updates the connection's {@link SOCClientData#sentAllScenarioStrings},
+     * {@link SOCClientData#sentAllScenarioInfo}, {@link SOCClientData#scenariosInfoSent} and
+     * related tracking fields.
+     *<P>
+     * Scenario's {@link SOCVersionedItem#minVersion minVersion} isn't checked here; may send information
+     * about a scenario that's too new for the client's version to join games with it.
+     *
+     * @param scKey  Scenario keyname, from
+     *     {@link SOCGame#getGameOptionStringValue(String) game.getGameOptionStringValue("SC")}, or null.
+     *     Sends nothing if {@code scKey} and {@code sc} are both null.
+     * @param sc  Scenario data if known, or null to use
+     *     {@link SOCScenario#getScenario(String) SOCScenario.getScenario(scKey)}.
+     *     When {@code sc != null}, will always send a {@link SOCScenarioInfo} message
+     *     even if {@link SOCClientData#sentAllScenarioInfo} is set, unless client version is too old.
+     * @param c  Client connection
+     * @param stringsOnly  If true, send only localized strings, not entire {@link SOCScenarioInfo}.
+     * @since 2.0.00
+     */
+    void sendGameScenarioInfo
+        (String scKey, final SOCScenario sc, final StringConnection c, final boolean stringsOnly)
+    {
+        if (scKey == null)
+        {
+            if (sc == null)
+                return;
+            else
+                scKey = sc.key;
+        }
+
+        final SOCClientData scd = (SOCClientData) c.getAppData();
+
+        if ((scd.sentAllScenarioInfo || (stringsOnly && scd.sentAllScenarioStrings))
+            && (sc == null))
+        {
+            return;  // <--- Already checked, nothing left to send ---
+        }
+
+        final int cliVers = c.getVersion();
+        if (cliVers < SOCScenario.VERSION_FOR_SCENARIOS)
+        {
+            scd.sentAllScenarioStrings = true;
+            scd.sentAllScenarioInfo = true;
+
+            return;  // <--- Client is too old ---
+        }
+
+        // Have we already sent this scenario's info or strings?
+        // If not, send now and update scd.scenariosInfoSent.
+
+        Map<String, String> scensSent = scd.scenariosInfoSent;
+
+        if ((sc == null) && (scensSent != null))
+        {
+            final String alreadySent = scensSent.get(scKey);
+            if ((alreadySent != null)
+                && (stringsOnly || alreadySent.equals(SOCClientData.SENT_SCEN_INFO)))
+            {
+                return;  // <--- Already sent ---
+            }
+        }
+
+        SOCScenario scSend = null;  // If not null, send full scenario info instead of only strings
+
+        if (sc != null)
+        {
+            scSend = sc;
+        }
+        else if (! stringsOnly)
+        {
+            SOCScenario s = SOCScenario.getScenario(scKey);
+            if ((s != null) && (s.lastModVersion > cliVers))
+                scSend = s;
+        }
+
+        String nm = null, desc = null;
+
+        final boolean localeHasScenStrs;
+        if (scd.checkedLocaleScenStrings)
+        {
+            localeHasScenStrs = scd.localeHasScenStrings;
+        } else {
+            localeHasScenStrs = SOCServer.clientHasLocalizedStrs_gameScenarios(c);
+
+            scd.localeHasScenStrings = localeHasScenStrs;
+            scd.checkedLocaleScenStrings = true;
+
+            if (! localeHasScenStrs)
+            {
+                // client's locale has no localized scenario strings, or c.getI18NLocale() == null
+                scd.sentAllScenarioStrings = true;
+            }
+        }
+
+        if (localeHasScenStrs)
+        {
+            try { nm = c.getLocalized("gamescen." + scKey + ".n"); }
+            catch (MissingResourceException e) {}
+
+            if (nm != null)
+            {
+                try { desc = c.getLocalized("gamescen." + scKey + ".d"); }
+                catch (MissingResourceException e) {}
+            }
+        }
+        else if (scSend == null)
+        {
+            return;  // <--- No scenario strings in locale, and no full info to send ---
+        }
+
+        if (scSend != null)
+        {
+            c.put(new SOCScenarioInfo(scSend, nm, desc).toCmd());
+        } else {
+            List<String> scenStrs = new ArrayList<String>();
+            scenStrs.add(scKey);
+            if (nm != null)
+            {
+                scenStrs.add(nm);
+                scenStrs.add(desc);  // null is OK
+            } else {
+                scenStrs.add(SOCLocalizedStrings.MARKER_KEY_UNKNOWN);
+            }
+
+            c.put(SOCLocalizedStrings.toCmd(SOCLocalizedStrings.TYPE_SCENARIO, 0, scenStrs));
+        }
+
+        // Remember what we sent it
+        if (scensSent == null)
+        {
+            scensSent = new HashMap<String, String>();
+            scd.scenariosInfoSent = scensSent;
+        }
+        scensSent.put(scKey, (stringsOnly) ? SOCClientData.SENT_SCEN_STRINGS : SOCClientData.SENT_SCEN_INFO);
+    }
+
+    /**
      * process the "new game with options request" message.
      * For messages sent, and other details,
      * see {@link #createOrJoinGameIfUserOK(StringConnection, String, String, String, Map)}.
@@ -6280,15 +7418,92 @@ public class SOCServer extends Server
     {
         final int cliVers = c.getVersion();
 
+        if (! SOCDBHelper.isInitialized())
+        {
+            // Send same SV_ status code as previous versions (before 1.1.19) which didn't check db.isInitialized
+            // but instead fell through and sent "Account not created due to error."
+
+            c.put(SOCStatusMessage.toCmd
+                    (SOCStatusMessage.SV_ACCT_NOT_CREATED_ERR, cliVers,
+                     c.getLocalized("account.common.no_accts")));  // "This server does not use accounts and passwords."
+            return;
+        }
+
+        final String requester = (String) c.getData();
+        boolean isDBCountedEmpty = false;  // with null requester, did we query and find the users table is empty?
+
+        // If client is not authenticated; does this server have open registration,
+        // or is an account required to create user accounts?
+        if ((requester == null) && ! features.isActive(SOCServerFeatures.FEAT_OPEN_REG))
+        {
+            // If account is required, are there any accounts in the db at all?
+            // if none, this first account creation won't require auth.
+            int count;
+            try
+            {
+                count = SOCDBHelper.countUsers();
+            }
+            catch (SQLException e)
+            {
+                c.put(SOCStatusMessage.toCmd
+                        (SOCStatusMessage.SV_PROBLEM_WITH_DB, cliVers,
+                         /*I*/"Problem connecting to database, please try again later."/*18N*/ ));
+                return;
+            }
+
+            if (count > 0)
+            {
+                c.put(SOCStatusMessage.toCmd
+                        (SOCStatusMessage.SV_PW_WRONG, cliVers, c.getLocalized("account.common.must_auth")));
+                             // "You must log in with a username and password before you can create accounts."
+                return;
+            }
+
+            isDBCountedEmpty = true;
+        }
+
         //
-        // check to see if there is an account with
-        // the requested nickname
+        // check to see if the requested nickname is permissable
+        //
+        final String userName = mes.getNickname();
+
+        if (! SOCMessage.isSingleLineAndSafe(userName))
+        {
+            c.put(SOCStatusMessage.toCmd
+                    (SOCStatusMessage.SV_NEWGAME_NAME_REJECTED, cliVers,
+                     SOCStatusMessage.MSG_SV_NEWGAME_NAME_REJECTED));
+            return;
+        }
+
+        //
+        // Check if we're using a user admin whitelist; this check is also in handleAUTHREQUEST.
+        //
+        // If databaseUserAdmins != null, then requester != null because FEAT_OPEN_REG can't also be active.
+        // If requester is null because db is empty, check new userName instead of requester name:
+        // The first account created must be on the whitelist in order to create further accounts.
+        // If the db is empty when account client connects, server sends it FEAT_OPEN_REG so it won't require
+        // user/password auth to create that first account; then requester == null, covered by isDBCountedEmpty.
+        if (databaseUserAdmins != null)
+        {
+            final String chkName = (isDBCountedEmpty) ? userName : requester;
+            if ((chkName == null) || ! databaseUserAdmins.contains(chkName))
+            {
+                // Requester not on user-admin whitelist.
+
+                c.put(SOCStatusMessage.toCmd
+                        (SOCStatusMessage.SV_ACCT_NOT_CREATED_DENIED, cliVers,
+                         c.getLocalized("account.create.not_auth")));  // "Your account is not authorized to create accounts."
+                return;
+            }
+        }
+
+        //
+        // check if there's already an account with requested nickname
         //
         String userPassword = null;
-
         try
         {
-            userPassword = SOCDBHelper.getUserPassword(mes.getNickname());
+            userPassword = SOCDBHelper.getUserPassword(userName);
         }
         catch (SQLException sqle)
         {
@@ -6303,7 +7518,7 @@ public class SOCServer extends Server
         {
             c.put(SOCStatusMessage.toCmd
                     (SOCStatusMessage.SV_NAME_IN_USE, cliVers,
-                     "The nickname '" + mes.getNickname() + "' is already in use."));
+                     "The nickname '" + userName + "' is already in use."));
 
             return;
         }
@@ -6317,18 +7532,26 @@ public class SOCServer extends Server
 
         try
         {
-            success = SOCDBHelper.createAccount(mes.getNickname(), c.host(), mes.getPassword(), mes.getEmail(), currentTime.getTime());
+            success = SOCDBHelper.createAccount(userName, c.host(), mes.getPassword(), mes.getEmail(), currentTime.getTime());
         }
         catch (SQLException sqle)
         {
-            System.err.println("Error creating account in db.");
+            System.err.println("SQL Error creating account in db.");
         }
 
         if (success)
         {
             c.put(SOCStatusMessage.toCmd
                     (SOCStatusMessage.SV_ACCT_CREATED_OK, cliVers,
-                     "Account created for '" + mes.getNickname() + "'."));
+                     "Account created for '" + userName + "'."));
+
+            System.out.println
+                ("Audit: Created jsettlers account '" + userName
+                 + ((requester != null) ? "' by '" + requester : "")
+                 + "' from " + c.host() + " at " + currentTime);
+
+            if (acctsNotOpenRegButNoUsers)
+                acctsNotOpenRegButNoUsers = false;
         }
         else
         {
@@ -6637,7 +7860,7 @@ public class SOCServer extends Server
          */
             reGame.setGameState(SOCGame.READY);
             readyGameAskRobotsJoin
-              (reGame, resetWithShuffledBots ? null : reBoard.robotConns);
+              (reGame, resetWithShuffledBots ? null : reBoard.robotConns, 0);
         }
 
         // All set.
@@ -6714,7 +7937,7 @@ public class SOCServer extends Server
     {
         if ((ga == null) || ! SOCDBHelper.isInitialized())
             return;
-        if (! init_getBoolProperty(props, SOCDBHelper.PROP_JSETTLERS_DB_SAVE_GAMES, false))
+        if (! getConfigBoolProperty(props, SOCDBHelper.PROP_JSETTLERS_DB_SAVE_GAMES, false))
             return;
 
         //D.ebugPrintln("allOriginalPlayers for "+ga.getName()+" : "+ga.allOriginalPlayers());
@@ -6761,7 +7984,7 @@ public class SOCServer extends Server
      * check for games that have expired and destroy them.
      * If games are about to expire, send a warning.
      * As of version 1.1.09, practice games ({@link SOCGame#isPractice} flag set) don't expire.
-     * Callback method from {@link SOCGameTimeoutChecker#run()}.
+     * Is callback method every few minutes from {@link SOCGameTimeoutChecker#run()}.
      *
      * @param currentTimeMillis  The time when called, from {@link System#currentTimeMillis()}
      * @see #GAME_EXPIRE_WARN_MINUTES
@@ -6826,10 +8049,14 @@ public class SOCServer extends Server
     }
 
     /**
-     * Check for robot turns that have expired, and end them.
-     * They may end from inactivity or from an illegal placement.
-     * Checks the {@link SOCGame#lastActionTime} field.
-     * Callback method from {@link SOCGameTimeoutChecker#run()}.
+     * Check all games for robot turns that have expired, and end them,
+     * or stop waiting for non-current-player robot actions (discard picks, etc).
+     * Robot turns may end from inactivity or from an illegal placement.
+     * Checks each game's {@link SOCGame#lastActionTime} field, and calls
+     * {@link GameHandler#endTurnIfInactive(SOCGame, long)} if the
+     * last action is older than {@link #ROBOT_FORCE_ENDTURN_SECONDS}.
+     *<P>
+     * Is callback method every few seconds from {@link SOCGameTimeoutChecker#run()}.
      *
      * @param currentTimeMillis  The time when called, from {@link System#currentTimeMillis()}
      * @see #ROBOT_FORCE_ENDTURN_SECONDS
@@ -6853,6 +8080,7 @@ public class SOCServer extends Server
                 long lastActionTime = ga.lastActionTime;
                 if (lastActionTime > inactiveTime)
                     continue;
+
                 if (ga.getGameState() >= SOCGame.OVER)
                 {
                     // bump out that time, so we don't see
@@ -6880,45 +8108,80 @@ public class SOCServer extends Server
     }
 
     /**
-     * Quick-and-dirty command line parsing of game options.
+     * Quick-and-dirty command line parsing of a game option.
      * Calls {@link SOCGameOption#setKnownOptionCurrentValue(SOCGameOption)}.
-     * @param optNameValue Game option name+value, of form expected by
-     *                     {@link SOCGameOption#parseOptionNameValue(String, boolean)}
-     * @return true if OK, false if bad name or value
+     *<P>
+     * Note that an unknown {@link SOCScenario} name (value of game option {@code "SC"})
+     * isn't treated as an error here; {@code SC}'s value will be set to the unknown scenario.
+     * Code elsewhere will print an error and halt startup.
+     *
+     * @param optNameValue Game option name+value, of {@code optname=optvalue} form expected by
+     *                     {@link SOCGameOption#parseOptionNameValue(String, boolean)}.
+     *                     Option keyname is case-insensitive.
+     * @param optsAlreadySet  For tracking, game option names we've already encountered on the command line.
+     *                        This method will add ({@code optName}, {@code optNameValue}) to this map.
+     *                        Can be {@code null} if not needed.
+     * @throws IllegalArgumentException if bad name, bad value, or already set from command line.
+     *         {@link Throwable#getMessage()} will have problem details:
+     *         <UL>
+     *         <LI> Unknown or malformed game option name, from
+     *           {@link SOCGameOption#parseOptionNameValue(String, boolean)}
+     *         <LI> Bad option value, from {@link SOCGameOption#setKnownOptionCurrentValue(SOCGameOption)}
+     *         <LI> Appears twice on command line, name is already in {@code optsAlreadySet}
+     *         </UL>
      * @since 1.1.07
      */
-    public static boolean parseCmdline_GameOption(final String optNameValue)
+    public static void parseCmdline_GameOption
+        (final String optNameValue, HashMap<String, String> optsAlreadySet)
+        throws IllegalArgumentException
     {
         SOCGameOption op = SOCGameOption.parseOptionNameValue(optNameValue, true);
         if (op == null)
-        {
-            System.err.println("Unknown or malformed game option: " + optNameValue);
-            return false;
-        }
+            throw new IllegalArgumentException("Unknown or malformed game option: " + optNameValue);
+
         if (op.optType == SOCGameOption.OTYPE_UNKNOWN)
-        {
-            System.err.println("Unknown game option: " + op.key);
-            return false;
-        }
+            throw new IllegalArgumentException("Unknown game option: " + op.key);
+
+        if ((optsAlreadySet != null) && optsAlreadySet.containsKey(op.key))
+            throw new IllegalArgumentException("Game option cannot appear twice on command line: " + op.key);
 
         try
         {
             SOCGameOption.setKnownOptionCurrentValue(op);
-            return true;
-        } catch (Throwable t)
-        {
-            System.err.println("Bad value, cannot set game option: " + op.key);
-            return false;
+            if (optsAlreadySet != null)
+                optsAlreadySet.put(op.key, optNameValue);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("Bad value, cannot set game option: " + op.key);
         }
     }
 
     /**
      * Quick-and-dirty parsing of command-line arguments with dashes.
      *<P>
+     * Checks first for the optional server startup properties file {@code "jsserver.properties"}
+     * ({@link #SOC_SERVER_PROPS_FILENAME}).
+     * If the file exists but there is an error reading it, calls {@link System#exit(int) System.exit(1)}
+     * to exit because currently only {@code main(..)} calls this method.
+     * For details on the java properties file syntax ({@code #} starts a comment line, etc),
+     * see {@link Properties#load(java.io.InputStream)}.
+     *<P>
+     * If a property appears on the command line and also in {@code jsserver.properties},
+     * the command line's value overrides the file's.
+     *<P>
      * If any game options are set ("-o", "--option"), then
      * {@link #hasSetGameOptions} is set to true, and
      * {@link SOCGameOption#setKnownOptionCurrentValue(SOCGameOption)}
      * is called to set them globally.
+     *<P>
+     * If {@code jsserver.properties} contains game option properties ({@code jsettlers.gameopt.*}),
+     * they will be checked for possible problems:
+     *<UL>
+     * <LI> Empty game option name after {@code jsettlers.gameopt.} prefix
+     * <LI> Unknown option name
+     * <LI> Problem with name or value reported from {@link #parseCmdline_GameOption(String, HashMap)}
+     * <LI> Default scenario's options override other options in properties file
+     *</UL>
+     * See {@link #PROP_JSETTLERS_GAMEOPT_PREFIX} for game option property syntax.
      *<P>
      * If <tt>args[]</tt> is empty, it will use defaults for
      * {@link #PROP_JSETTLERS_PORT} and {@link #PROP_JSETTLERS_CONNECTIONS}}.
@@ -6938,8 +8201,76 @@ public class SOCServer extends Server
      */
     public static Properties parseCmdline_DashedArgs(String[] args)
     {
+        // javadoc note: This public method's javadoc section about game option properties
+        // is copied for visibility from private init_propsSetGameopts.  If you update the
+        // text here, also update the same text in init_propsSetGameopts's javadoc.
+
         Properties argp = new Properties();
 
+        // check against options on command line twice: Can't just check argp keys because
+        // argp is loaded from jsserver.properties, then command-line properties can override
+        // anything set from there
+        HashSet<String> cmdlineOptsSet = new HashSet<String>();
+        HashMap<String, String> gameOptsAlreadySet = new HashMap<String, String>();
+            // used and updated by parseCmdline_GameOption
+
+        /**
+         * Read jsserver.properties first
+         */
+        try
+        {
+            final File pf = new File(SOC_SERVER_PROPS_FILENAME);
+            if (pf.exists())
+            {
+                if (pf.isFile() && pf.canRead())
+                {
+                    System.err.println("Reading startup properties from " + SOC_SERVER_PROPS_FILENAME);
+                    FileInputStream fis = new FileInputStream(pf);
+                    argp.load(fis);
+                    fis.close();
+                    try
+                    {
+                        init_propsSetGameopts(argp);
+
+                        // Prints warnings if conflicts. Prints error and returns false if "SC"
+                        // scenario name is unknown. When command line game opts are parsed,
+                        // another call to init_checkScenarioOpts will check the command line's
+                        // specified "SC" (if any) against both argp and command line's gameopts.
+                        if (! init_checkScenarioOpts(argp, true, SOC_SERVER_PROPS_FILENAME, null, null))
+                            throw new IllegalArgumentException();
+                    } catch (IllegalArgumentException e) {
+                        final String msg = e.getMessage();
+                        if (msg != null)
+                            System.err.println(msg);
+                        System.err.println
+                            ("*** Error in properties file " + SOC_SERVER_PROPS_FILENAME + ": Exiting.");
+                        System.exit(1);
+                    }
+                } else {
+                    System.err.println
+                        ("*** Properties file " + SOC_SERVER_PROPS_FILENAME
+                         + " exists but isn't a readable plain file: Exiting.");
+                    System.exit(1);
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            // SecurityException from .exists, .isFile, .canRead
+            // IOException from FileInputStream construc [FileNotFoundException], props.load
+            // IllegalArgumentException from props.load (malformed Unicode escape)
+            System.err.println
+                ("*** Error reading properties file " + SOC_SERVER_PROPS_FILENAME
+                 + ", exiting: " + e.toString());
+            if (e.getMessage() != null)
+                System.err.println("    : " + e.getMessage());
+            System.exit(1);
+        }
+
+        /**
+         * Now parse args[]
+         */
+        final int pfxL = PROP_JSETTLERS_GAMEOPT_PREFIX.length();
         int aidx = 0;
         while ((aidx < args.length) && (args[aidx].startsWith("-")))
         {
@@ -6971,8 +8302,13 @@ public class SOCServer extends Server
                 }
                 if (argValue != null)
                 {
-                    if (! parseCmdline_GameOption(argValue))
+                    try
+                    {
+                        parseCmdline_GameOption(argValue, gameOptsAlreadySet);
+                    } catch (IllegalArgumentException e) {
                         argValue = null;
+                        System.err.println(e.getMessage());
+                    }
                 }
                 if (argValue == null)
                 {
@@ -7018,12 +8354,94 @@ public class SOCServer extends Server
                     System.err.println("Missing value for property " + name);
                     return null;
                 }
+
+                if (cmdlineOptsSet.contains(name))
+                {
+                    System.err.println("Property cannot appear twice on command line: " + name);
+                    return null;
+                }
                 argp.setProperty(name, value);
+                cmdlineOptsSet.add(name);
+
+                // Is it a game option default value?
+                if (name.startsWith(PROP_JSETTLERS_GAMEOPT_PREFIX))
+                {
+                    final String optKey = name.substring(pfxL);
+                    boolean ok = true;
+                    if (optKey.length() == 0)
+                    {
+                        System.err.println("Empty game option name in property key: " + name);
+                        ok = false;
+                    } else {
+                        hasSetGameOptions = true;
+                        try
+                        {
+                            parseCmdline_GameOption(optKey + "=" + value, gameOptsAlreadySet);
+                        } catch (IllegalArgumentException e) {
+                            ok = false;
+                            System.err.println(e.getMessage());
+                            printGameOptions();
+                        }
+                    }
+
+                    if (! ok)
+                    {
+                        return null;
+                    }
+                }
+            }
+            else if (arg.startsWith("--pw-reset"))
+            {
+                String name = null;
+
+                if (arg.length() == 10)
+                {
+                    // next arg should be username
+                    ++aidx;
+                    if (aidx < args.length)
+                        name = args[aidx];
+                } else {
+                    // this arg should continue: =username
+                    if (arg.charAt(10) != '=')
+                    {
+                        System.err.println("Unknown argument: " + arg);
+                        return null;
+                    }
+                    name = arg.substring(11);
+                }
+
+                if ((name == null) || (name.length() == 0))
+                {
+                    System.err.println("Missing username after --pw-reset");
+                    return null;
+                }
+                argp.setProperty(SOCDBHelper.PROP_IMPL_JSETTLERS_PW_RESET, name);
 
             } else {
                 System.err.println("Unknown argument: " + arg);
             }
+
             ++aidx;
+        }
+        // End of named-parameter loop
+
+        if (! gameOptsAlreadySet.isEmpty())
+        {
+            // check cmdline's "SC" game opt vs any others; prints warnings if conflicts,
+            // prints error and returns false if "SC" scenario name is unknown
+            if (! init_checkScenarioOpts
+                (gameOptsAlreadySet, false, "Command line", null, null))
+            {
+                return null;  // <--- Early return: Unknown scenario name ---
+            }
+
+            if (gameOptsAlreadySet.containsKey("SC") && ! argp.isEmpty())
+            {
+                // also check cmdline's "SC" vs gameopts in properties file
+                final String scName = SOCGameOption.getOption("SC", false).getStringValue();
+                if (scName.length() > 0)
+                    init_checkScenarioOpts(argp, true, SOC_SERVER_PROPS_FILENAME, scName, "command line");
+            }
         }
 
         // Done parsing flagged parameters.
@@ -7031,10 +8449,15 @@ public class SOCServer extends Server
         if ((args.length - aidx) == 0)
         {
             // No positional parameters: Take defaults.
-            argp.setProperty(PROP_JSETTLERS_PORT, Integer.toString(SOC_PORT_DEFAULT));
-            argp.setProperty(PROP_JSETTLERS_CONNECTIONS, Integer.toString(SOC_MAXCONN_DEFAULT));
-            argp.setProperty(SOCDBHelper.PROP_JSETTLERS_DB_USER, "socuser");
-            argp.setProperty(SOCDBHelper.PROP_JSETTLERS_DB_PASS, "socpass");
+            // Check each one before setting it, in case was specified in properties file
+            if (! argp.containsKey(PROP_JSETTLERS_PORT))
+                argp.setProperty(PROP_JSETTLERS_PORT, Integer.toString(SOC_PORT_DEFAULT));
+            if (! argp.containsKey(PROP_JSETTLERS_CONNECTIONS))
+                argp.setProperty(PROP_JSETTLERS_CONNECTIONS, Integer.toString(SOC_MAXCONN_DEFAULT));
+            if (! argp.containsKey(SOCDBHelper.PROP_JSETTLERS_DB_USER))
+                argp.setProperty(SOCDBHelper.PROP_JSETTLERS_DB_USER, "socuser");
+            if (! argp.containsKey(SOCDBHelper.PROP_JSETTLERS_DB_PASS))
+                argp.setProperty(SOCDBHelper.PROP_JSETTLERS_DB_PASS, "socpass");
         } else {
             // Require all 4 parameters
             if ((args.length - aidx) < 4)
@@ -7050,6 +8473,15 @@ public class SOCServer extends Server
             }
             argp.setProperty(PROP_JSETTLERS_PORT, args[aidx]);  ++aidx;
             argp.setProperty(PROP_JSETTLERS_CONNECTIONS, args[aidx]);  ++aidx;
+
+            // Check DB user and password against any -D parameters in properties
+            if (cmdlineOptsSet.contains(SOCDBHelper.PROP_JSETTLERS_DB_USER)
+                || cmdlineOptsSet.contains(SOCDBHelper.PROP_JSETTLERS_DB_PASS))
+            {
+                System.err.println("SOCServer: DB user and password cannot appear twice on command line.");
+                printUsage(false);
+                return null;
+            }
             argp.setProperty(SOCDBHelper.PROP_JSETTLERS_DB_USER, args[aidx]);  ++aidx;
             argp.setProperty(SOCDBHelper.PROP_JSETTLERS_DB_PASS, args[aidx]);  ++aidx;
         }
@@ -7071,6 +8503,357 @@ public class SOCServer extends Server
 
         // Done parsing.
         return argp;
+    }
+
+    /**
+     * Set game option defaults from any jsettlers.gameopt.* server properties found ({@code jsettlers.gameopt.*}).
+     * Option keynames are case-insensitive past that prefix.
+     * See {@link #PROP_JSETTLERS_GAMEOPT_PREFIX} for expected syntax.
+     * Calls {@link #parseCmdline_GameOption(String, HashMap)} for each one found
+     * to set its current value in {@link SOCGameOptions}'s static set of known opts.
+     *<P>
+     * Note that an unknown {@link SOCSscenario} name (value of game option {@code "SC"})
+     * is not an error here; {@link #init_checkScenarioOpts(Map, boolean, String, String, String)}
+     * will check for that and its caller will halt startup if found.
+     *
+     * @param pr  Properties which may contain {@link #PROP_JSETTLERS_GAMEOPT_PREFIX}* entries
+     * @throws IllegalArgumentException if any game option property has a bad name or value.
+     *     {@link Throwable#getMessage()} will collect all option problems to 1 string, separated by {@code "\n"}:
+     *     <UL>
+     *     <LI> Empty game option name after {@code jsettlers.gameopt.} prefix
+     *     <LI> Unknown option name
+     *     <LI> Problem with name or value reported from {@link #parseCmdline_GameOption(String, HashMap)}
+     *     </UL>
+     * @since 2.0.00
+     */
+    private static final void init_propsSetGameopts(Properties pr)
+        throws IllegalArgumentException
+    {
+        // javadoc note: This method is private; public parseCmdline_DashedArgs calls it, so for visibility
+        // this method's javadoc section about game option properties is also there.  If you update text here,
+        // also update the same text in parseCmdline_DashedArgs's javadoc.
+
+        final int pfxL = PROP_JSETTLERS_GAMEOPT_PREFIX.length();
+        StringBuilder problems = null;
+
+        for (Object k : pr.keySet())
+        {
+            if (! ((k instanceof String) && ((String) k).startsWith(PROP_JSETTLERS_GAMEOPT_PREFIX)))
+                continue;
+
+            final String optKey = ((String) k).substring(pfxL);  // "jsettlers.gameopt.n7" -> "n7"
+            if (optKey.length() == 0)
+            {
+                if (problems == null)
+                    problems = new StringBuilder();
+                else
+                    problems.append("\n");
+                problems.append("Empty game option name in property key: ");
+                problems.append(k);
+                continue;
+            }
+
+            try
+            {
+                // parse this gameopt and set its current value in SOCGameOptions static set of known opts
+                parseCmdline_GameOption(optKey + "=" + pr.getProperty((String) k), null);
+                hasSetGameOptions = true;
+            } catch (IllegalArgumentException e) {
+                if (problems == null)
+                    problems = new StringBuilder();
+                else
+                    problems.append("\n");
+                problems.append(e.getMessage());
+            }
+        }
+
+        if (problems != null)
+            throw new IllegalArgumentException(problems.toString());
+    }
+
+    /**
+     * When a server's properties or command line contain a default scenario (game option {@code "SC"}),
+     * check that the scenario is known and that its game options don't conflict with any others specified
+     * in the properties or command line.
+     *<P>
+     * The scenario named in {@code opts.get("SC")} or {@code scName} is retrieved with
+     * {@link SOCScenario#getScenario(String)}; an empty scenario name "" is treated as an unknown scenario.
+     *<P>
+     * The scenario will be the default scenario, but its option values aren't set as default at server startup.
+     * When a new game begins using that scenario, at that time scenario options override any other options
+     * specified for the game (except whichever {@code "VP"} is greater is kept).  Since the user may specify
+     * a different scenario, 'conflicting' options in {@code opts} are only potentially a problem and will be
+     * returned as a list for warnings (not errors) to be printed during server init.
+     *
+     * @param opts  Option name key and value strings, typically from command line or
+     *    properties file parsing.  See {@code optsIsFromProps} for format of {@code opts} keys and values.
+     * @param optsAreProps  If true, {@code opts} keys and values are from the properties file:
+     *    key = {@link #PROP_JSETTLERS_GAMEOPT_PREFIX} + optname, value = option value.
+     *    If false, keys and values are from command line parsing:
+     *    key = optname, value = optkey + "=" + optname.
+     * @param scName  Scenario name to check against, or {@code null} to use value of {@code opts.get("SC"}); never ""
+     * @returns A list of game option names and value strings from {@code opts} which would be overwritten by
+     *     those from opts' {@code "SC"} scenario, or {@code null} if no potential conflicts.
+     *    <P>
+     *     For ease of use by caller, the extracted default scenario is the first item in the list.
+     *     (If there are no conflicts, the list is {@code null}; the scenario will not be returned.)
+     *     This list item's {@link Triple} contains:
+     *     <UL>
+     *      <LI> {@code "SC"}
+     *      <LI> specified scenario name, such as {@code "SC_FOG"}
+     *      <LI> scenario game options string ({@link SOCScenario#scOpts}), never "" or {@code null}
+     *     </UL>
+     *    <P>
+     *     Each other list item is a {@link Triple} containing:
+     *     <UL>
+     *      <LI> option name
+     *      <LI> value in {@code opts}
+     *      <LI> value in default scenario
+     *    </UL>
+     *    <P>
+     *     If the specified scenario is unknown at this version, the returned list will contain only 1 item,
+     *     a {@code Triple} with:
+     *     <UL>
+     *      <LI> {@code "SC"}
+     *      <LI> specified scenario name
+     *      <LI> {@code null}
+     *     </UL>
+     * @since 2.0.00
+     */
+    public static List<Triple> checkScenarioOpts
+        (final Map<?, ?> opts, final boolean optsAreProps, String scName)
+    {
+        List<Triple> scenConflictWarns = null;
+
+        if (scName == null)
+        {
+            final String scKey = (optsAreProps) ? (PROP_JSETTLERS_GAMEOPT_PREFIX + "SC") : "SC";
+            if (opts.containsKey(scKey))
+            {
+                scName = (String) opts.get(scKey);
+                if (! optsAreProps)
+                    scName = scName.substring(scName.indexOf('=') + 1).trim();
+                       // indexOf should be okay, because this is called after parsing cmdline options;
+                       // if somehow it's -1 then we get entire string from substring(0).
+            } else {
+                return null;  // <--- Early return: no default scenario ---
+            }
+        }
+
+        scenConflictWarns = new ArrayList<Triple>();
+
+        final SOCScenario sc = SOCScenario.getScenario(scName);
+        if (sc == null)
+        {
+            scenConflictWarns.add(new Triple("SC", scName, null));
+
+            return scenConflictWarns;  // <--- Early return: unknown scenario ---
+        }
+
+        final String scOptsStr = sc.scOpts;
+        if ((scOptsStr == null) || (scOptsStr.length() == 0))
+            return null;  // <--- Early return: no gameopts in scenario ---
+
+        final Map<String, SOCGameOption> scOpts = SOCGameOption.parseOptionsToMap(scOptsStr);
+
+        StringBuilder sb = new StringBuilder();
+        for (SOCGameOption scOpt : scOpts.values())
+        {
+            // TODO robustness: Case-insensitive searching
+
+            final String optKey = (optsAreProps) ? (PROP_JSETTLERS_GAMEOPT_PREFIX + scOpt.key) : scOpt.key;
+            if (! opts.containsKey(optKey))
+                continue;
+
+            String mapOptVal = (String) opts.get(optKey);
+            if (! optsAreProps)
+                mapOptVal = mapOptVal.substring(mapOptVal.indexOf('=') + 1).trim();
+                   // indexOf should be okay, because this is called after parsing cmdline options;
+                   // if somehow it's -1 then we get entire string from substring(0).
+            mapOptVal = mapOptVal.toLowerCase(Locale.US);
+
+            sb.setLength(0);  // reset from previous iteration
+            scOpt.packValue(sb);
+
+            if (! scOpt.key.equals("VP"))
+            {
+                final String scOptVal = sb.toString().toLowerCase(Locale.US);
+                if (! mapOptVal.equals(scOptVal))
+                    scenConflictWarns.add(new Triple(scOpt.key, mapOptVal, scOptVal));
+            } else {
+                // VP: special case: warn only if scen has false or a lower int value
+
+                if (mapOptVal.charAt(0) == 'f')
+                    continue;  // opts map doesn't specify VP
+
+                if (scOpt.getBoolValue())
+                {
+                    int mapVP;
+                    try {
+                        mapVP = Integer.parseInt(mapOptVal.substring(1));
+                    } catch (NumberFormatException e ) {
+                        mapVP = 0;  // unlikely, called after cmdline parsing
+                    }
+
+                    if (mapVP <= scOpt.getIntValue())
+                        continue;  // opts map's VP not greater than scen's VP
+                }
+
+                scenConflictWarns.add(new Triple(scOpt.key, mapOptVal, sb.toString()));
+            }
+        }
+
+        if (scenConflictWarns.isEmpty())
+            return null;
+
+        // insert scenario name and opts at start of list
+        scenConflictWarns.add(0, new Triple("SC", scName, scOptsStr));
+
+        return scenConflictWarns;
+    }
+
+    /**
+     * During startup, call {@link #checkScenarioOpts(Map, boolean, String)} and print any warnings it returns
+     * to {@link System#err}.  An unknown scenario name is printed as an error not a warning.
+     * An empty scenario name "" from {@code opts.get("SC")} or {@code scName} is treated as an unknown scenario.
+     * @param opts  Options to check, see {@link #checkScenarioOpts(Map, boolean, String)}
+     * @param optsAreProps  Are {@code} opts from properties or command line?
+     *     See {@link #checkScenarioOpts(Map, boolean, String)}.
+     * @param srcDesc  Description of {@code opts} for warning message text:
+     *     "Command line" or properties filename "jsserver.properties"
+     * @param scName  Scenario name to check against, or {@code null} to use value of {@code opts.get("SC"}); never ""
+     * @param scNameSrcDesc  If {@code scName} isn't from {@code opts}, lowercase description of its source
+     *     for warnings (like {@code srcDesc}), or {@code null}.
+     *     If {@code scNameSrcDesc != null}, will not print a warning if {@code scName} is unknown, to avoid
+     *     repeating the warning already printed when that SC was checked within its source.
+     * @return True if the provided scenario name is known or there is no {@code "SC"} option, false if unknown.
+     * @since 2.0.00
+     */
+    private static boolean init_checkScenarioOpts
+        (final Map<?, ?> opts, final boolean optsAreProps, final String srcDesc, String scName, String scNameSrcDesc)
+    {
+        List<Triple> warns = checkScenarioOpts(opts, optsAreProps, scName);
+        if (warns == null)
+            return true;
+
+        if (scName == null)
+            scName = (String) (warns.get(0).getB());  // first list item is scenario info, optName "SC"
+
+        boolean scenKnown = true;
+        for (Triple warn : warns)
+        {
+            final String optName = (String) (warn.getA());
+            if (optName.equals("SC"))
+            {
+                if ((warn.getC() == null) && (scNameSrcDesc == null))
+                {
+                    System.err.println("Error: " + srcDesc + " default scenario " + scName + " is unknown");
+                    scenKnown = false;
+                }
+            } else {
+                System.err.println("Warning: " + srcDesc + " game option " + optName + " value " + warn.getB()
+                    + ((scNameSrcDesc != null)
+                           ? (" is changed in " + scNameSrcDesc + " default scenario ")
+                           : " is changed in default scenario ")
+                    + scName + " to " + warn.getC());
+            }
+        }
+
+        return scenKnown;
+    }
+
+    /**
+     * If command line contains {@code --pw-reset=username},
+     * prompt for and change that user's password.
+     *<P>
+     * If successful, sets {@link #getUtilityModeMessage()} to "The password was changed"
+     * or similar; if unsuccessful (no db, user not found, etc), prints an error and
+     * sets {@link #getUtilityModeMessage()} to {@code null}.
+     *
+     * @param uname  Username to change password
+     * @since 2.0.00
+     */
+    private void init_resetUserPassword(final String uname)
+    {
+        utilityModeMessage = null;
+
+        if (! SOCDBHelper.isInitialized())
+        {
+            System.err.println("--pw-reset requires database connection properties.");
+            return;
+        }
+
+        System.out.println("Resetting password for " + uname + ".");
+
+        try
+        {
+            if (! SOCDBHelper.doesUserExist(uname))
+            {
+                System.err.println("pw-reset user " + uname + " not found in database.");
+                return;
+            }
+        } catch (SQLException e) {
+            System.err.println("Error while querying user " + uname + ": " + e.getMessage());
+            return;
+        }
+
+        StringBuilder pw1 = null;
+        boolean hasNewPW = false;
+        for (int tries = 0; tries < 3; ++tries)
+        {
+            if (tries > 0)
+                System.out.println("Passwords do not match; try again.");
+
+            pw1 = readPassword("Enter the new password:");
+            if (pw1 == null)
+                break;
+
+            StringBuilder pw2 = readPassword("Confirm new password:  ");
+
+            if (pw2 == null)
+            {
+                break;
+            } else {
+                // compare; unfortunately there is no StringBuffer.equals(sb) method
+
+                final int L1 = pw1.length(), L2 = pw2.length();
+                if (L1 == L2)
+                {
+                    final char[] pc1 = new char[L1], pc2 = new char[L2];
+                    pw1.getChars(0, L1, pc1, 0);
+                    pw2.getChars(0, L2, pc2, 0);
+
+                    hasNewPW = (Arrays.equals(pc1, pc2));
+
+                    Arrays.fill(pc1, (char) 0);
+                    Arrays.fill(pc2, (char) 0);
+                }
+
+                if (hasNewPW)
+                {
+                    clearBuffer(pw2);
+                    break;
+                }
+            }
+        }
+
+        if (! hasNewPW)
+        {
+            if (pw1 != null)
+                clearBuffer(pw1);
+            System.err.println("Password reset cancelled.");
+            return;
+        }
+
+        try
+        {
+            SOCDBHelper.updateUserPassword(uname, pw1.toString());
+            clearBuffer(pw1);
+            utilityModeMessage = "The password was changed";
+        } catch (SQLException e) {
+            System.err.println("Error while resetting password: " + e.getMessage());
+        }
+
     }
 
     /**
@@ -7141,7 +8924,7 @@ public class SOCServer extends Server
             boolean quotes = (opt.optType == SOCGameOption.OTYPE_STR) || (opt.optType == SOCGameOption.OTYPE_STRHIDE);
             // OTYPE_* - consider any type-specific output in this method.
 
-            StringBuffer sb = new StringBuffer("  ");
+            StringBuilder sb = new StringBuilder("  ");
             sb.append(okey);
             sb.append(" (");
             sb.append(SOCGameOption.optionTypeName(opt.optType));
@@ -7152,11 +8935,13 @@ public class SOCServer extends Server
             if (quotes)
                 sb.append('"');
             sb.append("  ");
-            sb.append(opt.desc);
+            sb.append(opt.getDesc());
             System.err.println(sb.toString());
+
             if (opt.enumVals != null)  // possible values of OTYPE_ENUM
             {
-                sb = new StringBuffer("    option choices (1-n): ");
+                sb.setLength(0);
+                sb.append("    option choices (1-n): ");
                 for (int i = 1; i <= opt.maxIntValue; ++i)
                 {
                     sb.append(' ');
@@ -7181,7 +8966,95 @@ public class SOCServer extends Server
     }
 
     /**
+     * Clear the contents of a StringBuffer by setting to ' '
+     * each character in its current {@link StringBuilder#length()}.
+     * @param sb  StringBuilder to clear
+     * @since 2.0.00
+     */
+    private static void clearBuffer(StringBuilder sb)
+    {
+        final int L = sb.length();
+        for (int i = 0; i < L; ++i)
+            sb.setCharAt(i, (char) 0);
+    }
+
+    /**
+     * Buffered {@link System#in} for {@link #readPassword(String)},
+     * is {@code null} until first call to that method.
+     * @since 2.0.00
+     */
+    private static BufferedReader sysInBuffered = null;
+
+    /**
+     * Read a password from the console; currently used for password reset.
+     * Blocks the calling thread while waiting for input.
+     *<P>
+     * This rudimentary method exists for compatability: java 1.5 doesn't have
+     * {@code System.console.readPassword()}, and the Eclipse console also
+     * doesn't offer {@code System.console}.
+     *<P>
+     * <B>The input is not masked</B> because there's no cross-platform way to do so in 1.5.
+     *
+     * @param prompt  Optional password prompt; default is "Password:"
+     * @return  The password read, or an empty string "" if an error occurred.
+     *     This is returned as a mutable StringBuilder
+     *     so the caller can clear its contents when done, using
+     *     {@link #clearBuffer(StringBuilder)}.
+     *     If ^C or an error occurs, returns {@code null}.
+     * @since 2.0.00
+     */
+    private static StringBuilder readPassword(String prompt)
+    {
+        // java 1.5 doesn't have System.console.readPassword
+        // (TODO) consider reflection for 1.6+ JREs
+
+        // System.in can read only an entire line (no portable raw mode in 1.5),
+        // so we can't mask after each character.
+
+        if (prompt == null)
+            prompt = "Password:";
+
+        System.out.print(prompt);
+        System.out.print(' ');
+        System.out.flush();
+
+        if (sysInBuffered == null)
+            sysInBuffered = new BufferedReader(new InputStreamReader(System.in));
+
+        try
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.append(sysInBuffered.readLine());
+
+            // Remove trailing newline char(s)
+            while (true)
+            {
+                int L = sb.length();
+                if (L == 0)
+                    break;
+
+                final char ch = sb.charAt(L - 1);
+                if ((ch != '\n') && (ch != '\r'))
+                    break;
+
+                sb.setLength(L - 1);
+            }
+
+            return sb;
+        }
+        catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
      * Starting the server from the command line
+     *<P>
+     * Checks for the optional server startup properties file {@code "jsserver.properties"},
+     * and parses the command line for switches. If a property appears on the command line and
+     * also in {@code jsserver.properties}, the command line's value overrides the file's.
+     *<P>
+     * Creates and starts a {@link SOCServer} via {@link #SOCServer(int, Properties)}.
      *<P>
      * If there are problems with the network setup,
      * or with running a {@link SOCDBHelper#PROP_JSETTLERS_DB_SCRIPT_SETUP db setup script},
@@ -7195,7 +9068,7 @@ public class SOCServer extends Server
      */
     static public void main(String[] args)
     {
-        Properties argp = parseCmdline_DashedArgs(args);
+        Properties argp = parseCmdline_DashedArgs(args);  // also reads jsserver.properties if exists
         if (argp == null)
         {
             printUsage(false);
@@ -7216,10 +9089,26 @@ public class SOCServer extends Server
             try
             {
                 SOCServer server = new SOCServer(port, argp);
-                server.setPriority(5);
-                server.start();  // <---- Start the Main SOCServer Thread ----
+                if (! server.hasUtilityModeProperty())
+                {
+                    server.setPriority(5);
+                    server.start();  // <---- Start the Main SOCServer Thread: serverUp() method ----
+                } else {
+                    String pval = argp.getProperty(SOCDBHelper.PROP_IMPL_JSETTLERS_PW_RESET);
+                    if (pval != null)
+                        server.init_resetUserPassword(pval);
+
+                    final String msg = server.getUtilityModeMessage();
+                    System.err.println(
+                        (msg != null)
+                            ? "\n" + msg + ". Exiting now.\n"
+                            : "\nExiting now.\n"
+                        );
+                }
 
                 // Most threads are started in the SOCServer constructor, via initSocServer.
+                // initSocServer also handles command line and properties-file contents,
+                // including game option default/current values.
                 // Messages from clients are handled in processCommand's loop.
             }
             catch (SocketException e)
@@ -7230,7 +9119,7 @@ public class SOCServer extends Server
             }
             catch (EOFException e)
             {
-                // the sql setup script was ran successfully by initialize;
+                // The sql setup script was ran successfully by initialize;
                 // exit server, user will re-run without the setup script param.
                 System.err.println("\nDB setup script was successful. Exiting now.\n");
                 System.exit(2);
@@ -7242,6 +9131,12 @@ public class SOCServer extends Server
                 // exception detail was printed in initSocServer.
                 if (argp.containsKey(SOCDBHelper.PROP_JSETTLERS_DB_SCRIPT_SETUP))
                     System.err.println("\n* DB setup script failed. Exiting now.\n");
+                System.exit(1);
+            }
+            catch (IllegalArgumentException e)
+            {
+                System.err.println(e.getMessage());
+                System.err.println("\n* Error in game options properties: Exiting now.\n");
                 System.exit(1);
             }
         }

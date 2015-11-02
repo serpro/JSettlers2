@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2009-2010,2012 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2009-2010,2012,2014-2015 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -115,6 +115,10 @@ public class SOCDBHelper
     /** Property <tt>jsettlers.db.script.setup</tt> to run a SQL setup script
      * at server startup, then exit.  Used to create tables when setting up a server.
      * To activate this feature, set this to the SQL script's full path or relative path.
+     *<P>
+     * To implement this, the SOCServer constructor connects to the db and runs the setup script,
+     * then signals success by throwing an {@link java.io.EOFException EOFException} which is
+     * caught by {@code main(..)}.  Errors throw {@link SQLException} instead.
      * @since 1.1.15
      */
     public static final String PROP_JSETTLERS_DB_SCRIPT_SETUP = "jsettlers.db.script.setup";
@@ -125,6 +129,18 @@ public class SOCDBHelper
      * @since 1.1.15
      */
     public static final String PROP_JSETTLERS_DB_SAVE_GAMES = "jsettlers.db.save.games";
+
+    /**
+     * Internal property name used to hold the <tt>--pw-reset</tt> command line argument's username.
+     * When present at server startup, the server will prompt and reset the password if the user exists,
+     * then exit.
+     *<P>
+     * This is a Utility Mode parameter; not for use in property files, because the program always exits
+     * after trying to change the password.
+     *
+     * @since 2.0.00
+     */
+    public static final String PROP_IMPL_JSETTLERS_PW_RESET = "_jsettlers.user.pw_reset";
 
     /**
      * The db driver used, or null if none.
@@ -191,14 +207,21 @@ public class SOCDBHelper
     private static String USER_PASSWORD_QUERY = "SELECT password FROM users WHERE ( users.nickname = ? );";
     private static String HOST_QUERY = "SELECT nickname FROM users WHERE ( users.host = ? );";
     private static String LASTLOGIN_UPDATE = "UPDATE users SET lastlogin = ?  WHERE nickname = ? ;";
+    private static final String PASSWORD_UPDATE = "UPDATE users SET password = ?  WHERE nickname = ? ;";
     private static String SAVE_GAME_COMMAND = "INSERT INTO games VALUES (?,?,?,?,?,?,?,?,?,?);";
     private static String ROBOT_PARAMS_QUERY = "SELECT * FROM robotparams WHERE robotname = ?;";
+    private static final String USER_COUNT_QUERY = "SELECT count(*) FROM users;";
+    private static final String USER_EXISTS_QUERY = "SELECT count(nickname) FROM users WHERE nickname = ?;";
 
     private static PreparedStatement createAccountCommand = null;
     private static PreparedStatement recordLoginCommand = null;
+    /** Query whether a user nickname exists; {@link #USER_EXISTS_QUERY} */
+    private static PreparedStatement userExistsQuery = null;
     private static PreparedStatement userPasswordQuery = null;
     private static PreparedStatement hostQuery = null;
     private static PreparedStatement lastloginUpdate = null;
+    /** User password update: {@link #PASSWORD_UPDATE} */
+    private static PreparedStatement passwordUpdate = null;
     private static PreparedStatement saveGameCommand = null;
 
     /** Query all robot parameters for a bot name; {@link #ROBOT_PARAMS_QUERY}.
@@ -206,9 +229,16 @@ public class SOCDBHelper
      */
     private static PreparedStatement robotParamsQuery = null;
 
+    /** Query how many users, if any, exist in the users table; {@link #USER_COUNT_QUERY}.
+     *  @since 1.1.19
+     */
+    private static PreparedStatement userCountQuery = null;
+
     /**
      * This makes a connection to the database
      * and initializes the prepared statements.
+     * (If <tt>props</tt> includes {@link #PROP_JSETTLERS_DB_SCRIPT_SETUP}, that script
+     * is run before the prepared statements.)
      * Sets {@link #isInitialized()}.
      *<P>
      * The default URL is "jdbc:mysql://localhost/socdata".
@@ -393,7 +423,8 @@ public class SOCDBHelper
      *
      * @param user  DB username
      * @param pswd  DB user password
-     * @param setupScriptPath  Full path or relative path to SQL script to run at connect, or null
+     * @param setupScriptPath  Full path or relative path to SQL script to run at connect, or null;
+     *     typically from {@link #PROP_JSETTLERS_DB_SCRIPT_SETUP}
      * @throws IOException  if <tt>setupScriptPath</tt> wasn't found, or if any other IO error occurs reading the script
      * @throws SQLException if any connect error, missing table, or SQL error occurs
      * @return  true on success; will never return false, instead will throw a sqlexception
@@ -420,11 +451,14 @@ public class SOCDBHelper
         // prepare PreparedStatements for queries
         createAccountCommand = connection.prepareStatement(CREATE_ACCOUNT_COMMAND);
         recordLoginCommand = connection.prepareStatement(RECORD_LOGIN_COMMAND);
+        userExistsQuery = connection.prepareStatement(USER_EXISTS_QUERY);
         userPasswordQuery = connection.prepareStatement(USER_PASSWORD_QUERY);
         hostQuery = connection.prepareStatement(HOST_QUERY);
         lastloginUpdate = connection.prepareStatement(LASTLOGIN_UPDATE);
+        passwordUpdate = connection.prepareStatement(PASSWORD_UPDATE);
         saveGameCommand = connection.prepareStatement(SAVE_GAME_COMMAND);
         robotParamsQuery = connection.prepareStatement(ROBOT_PARAMS_QUERY);
+        userCountQuery = connection.prepareStatement(USER_COUNT_QUERY);
 
         return true;
     }
@@ -511,7 +545,37 @@ public class SOCDBHelper
             cmd.close();
         }
     }
-    
+
+    /**
+     * Does this user (nickname) exist in the database?
+     * @param userName  User nickname to check
+     * @return  True if found in users table, false otherwise or if no database is currently connected
+     * @throws IllegalArgumentException if {@code userName} is {@code null}
+     * @throws SQLException if any unexpected database problem
+     * @since 2.0.00
+     */
+    public static boolean doesUserExist(final String userName)
+        throws IllegalArgumentException, SQLException
+    {
+        if (userName == null)
+            throw new IllegalArgumentException();
+
+        if (! checkConnection())
+            return false;
+
+        userExistsQuery.setString(1, userName);
+        boolean found;
+
+        ResultSet rs = userExistsQuery.executeQuery();
+        if (rs.next())
+            found = (rs.getInt(1) > 0);
+        else
+            found = false;
+
+        rs.close();
+        return found;
+    }
+
     /**
      * Retrieve this user's password from the database.
      *
@@ -611,8 +675,13 @@ public class SOCDBHelper
      *
      * @throws SQLException DOCUMENT ME!
      */
-    public static boolean createAccount(String userName, String host, String password, String email, long time) throws SQLException
+    public static boolean createAccount
+        (String userName, String host, String password, String email, long time)
+        throws SQLException
     {
+        // When the password encoding or max length changes in jsettlers-tables.sql,
+        // be sure to update this method and updateUserPassword.
+
         // ensure that the JDBC connection is still valid
         if (checkConnection())
         {
@@ -727,9 +796,51 @@ public class SOCDBHelper
     }
 
     /**
+     * Update a user's password if the user is in the database.
+     * @param userName  Username to update.  Does not validate this user exists: Call {@link #doesUserExist(String)}
+     *     first to do so.
+     * @param newPassword  New password (length can be 1 to 20)
+     * @return  True if the update command succeeded, false if can't connect to db.
+     *     <BR><B>Note:</B> If there is no user with {@code userName}, will nonetheless return true.
+     * @throws IllegalArgumentException  If user or password are null, or password is too short or too long
+     * @throws SQLException if an error occurs
+     * @since 2.0.00
+     */
+    public static boolean updateUserPassword(final String userName, final String newPassword)
+        throws IllegalArgumentException, SQLException
+    {
+        if (userName == null)
+            throw new IllegalArgumentException("userName");
+        if ((newPassword == null) || (newPassword.length() == 0) || (newPassword.length() > 20))
+            throw new IllegalArgumentException("newPassword");
+
+        // When the password encoding or max length changes in jsettlers-tables.sql,
+        // be sure to update this method and createAccount.
+
+        if (! checkConnection())
+            return false;
+
+        try
+        {
+            passwordUpdate.setString(1, newPassword);
+            passwordUpdate.setString(2, userName);
+            passwordUpdate.executeUpdate();
+
+            return true;
+        }
+        catch (SQLException sqlE)
+        {
+            errorCondition = true;
+            sqlE.printStackTrace();
+
+            throw sqlE;
+        }
+    }
+
+    /**
      * Record this game's time, players, and scores in the database.
      *
-     * @param game  Game that's just completed
+     * @param ga  Game that's just completed
      * @param gameLengthSeconds  Duration of game
      *
      * @return true if the save succeeded
@@ -798,11 +909,18 @@ public class SOCDBHelper
      * Try and fit names and scores of player 5 and/or player 6
      * into the 4 db slots, for backwards-compatibility.
      * Checks {@link SOCGame#isSeatVacant(int) ga.isSeatVacant(pn)}
+     * and {@link SOCPlayer#isRobot() ga.getPlayer(pn).isRobot()}
      * for the first 4 player numbers, and copies player 5 and 6's
      * data to those positions in <tt>names[]</tt> and <tt>scores[]</tt>.
+     *<P>
+     * v1.1.15: Copy to vacant slots among first 4 players.
+     *<P>
+     * v1.1.19: Copy to vacant slots or robot slots among first 4; if human player
+     * 5 or 6 won, overwrite the lowest-scoring non-winner slot if necessary.
+     *
      * @param ga  Game that's over
-     * @param names  Player names for player number 0-5; contents will be changed
-     * @param scores  Player scores for player number 0-5; contents will be changed
+     * @param names  Player names for player number 0-5; contents of 0-3 may be changed
+     * @param scores  Player scores for player number 0-5; contents of 0-3 may be changed
      * @since 1.1.15
      */
     private static void saveGameScores_fit6pInto4
@@ -811,64 +929,142 @@ public class SOCDBHelper
         // Need to try and fit player 5 and/or player 6
         // into the 4 db slots (backwards-compatibility)
 
-        int nVacantLow = 0;
-        for (int pn = 0; pn < 4; ++pn)
-            if (ga.isSeatVacant(pn))
-                ++nVacantLow;
-
-        int nOccupiedHigh = 0;
-        int plHighA = -1, plHighB = -1;
-        if (! ga.isSeatVacant(4))
+        int winnerPN;
         {
-            ++nOccupiedHigh;
-            plHighA = 4;
+            SOCPlayer pl = ga.getPlayerWithWin();
+            winnerPN = (pl != null) ? pl.getPlayerNumber() : -1;
         }
+
+        int nVacantLow = 0, nBotLow = 0;
+        final boolean[] isBot = new boolean[4], // track isBot locally, since we're rearranging pn 0-3 from game obj
+                        isVacant = new boolean[4];  // same with isVacant
+        for (int pn = 0; pn < 4; ++pn)
+        {
+            if (ga.isSeatVacant(pn))
+            {
+                isVacant[pn] = true;
+                ++nVacantLow;
+            }
+            else if (ga.getPlayer(pn).isRobot())
+            {
+                isBot[pn] = true;
+                if (pn != winnerPN)
+                    ++nBotLow;
+            }
+        }
+
+        int[] pnHigh = { -1, -1 };  // Occupied high pn: Will try to find a place for first and then for second element
+
+        if (! ga.isSeatVacant(4))
+            pnHigh[0] = 4;
+
         if (! ga.isSeatVacant(5))
         {
-            ++nOccupiedHigh;
-            if (plHighA != -1)
-                plHighB = 5;
-            else
-                plHighA = 5;
+            if (pnHigh[0] == -1)
+            {
+                pnHigh[0] = 5;
+            } else {
+                // record score for humans before robots if 4 and 5 are both occupied.
+                // pnHigh[0] takes priority: claim it if pl 5 is human and is winner, or pl 4 is a bot that didn't win
+                if ( (! ga.getPlayer(5).isRobot())
+                      && ( (winnerPN == 5) || (ga.getPlayer(4).isRobot() && (winnerPN != 4)) ) )
+                {
+                    pnHigh[0] = 5;
+                    pnHigh[1] = 4;
+                } else {
+                    pnHigh[1] = 5;
+                    // pnHigh[0] unchanged == 4
+                }
+            }
         }
 
-        if (nVacantLow >= nOccupiedHigh)
+        if ((winnerPN >= 4) && (! ga.getPlayer(winnerPN).isRobot()) && (nVacantLow == 0) && (nBotLow == 0))
         {
-            // Enough room; total non-vacant players <= 4.
+            // No room to replace a bot or take a vacant spot:
+            // Make sure at least the human winner is recorded instead of the lowest non-winner score.
+            // (If nVacantLow > 0 or nBotLow > 0, the main loop would take care of recording the winner.)
+            // Find the lowest-score spot among pn 0 - 3, replace with winner.
+            // TODO Maybe extend this to just sort non-bot scores & names highest to lowest?
 
-            // First, find a spot for plHighA
-            int pn = 0;
-            for (; pn < 4; ++pn)
+            int pnLow = 0, scoreLow = scores[0];
+            for (int pn = 1; pn < 4; ++pn)
             {
-                if (ga.isSeatVacant(pn))
+                if (scores[pn] < scoreLow)
                 {
-                    // pn gets plHighA's info
-                    names[pn] = names[plHighA];
-                    scores[pn] = scores[plHighA];
-                    break;
+                    pnLow = pn;
+                    scoreLow = scores[pn];
                 }
             }
 
-            if (plHighB != -1)
+            names[pnLow] = names[winnerPN];
+            scores[pnLow] = scores[winnerPN];
+
+            return;  // <---- Early return ----
+        }
+
+        // Run through loop twice: pnHigh[0], then pnHigh[1]
+        // Record score for humans before robots:
+        // - if vacant spot, take that
+        // - otherwise take lowest-score bot that didn't win, if any
+        // - otherwise if is a robot that didn't win, don't worry about claiming a spot
+
+        for (int i = 0; i < 2; ++i)
+        {
+            final int pnH = pnHigh[i];
+            if (pnH == -1)
+                break;
+
+            if (nVacantLow > 0)
             {
-                // Find a spot for plHighB
-                ++pn;
-                for (; pn < 4; ++pn)
+                for (int pn = 0; pn < 4; ++pn)
                 {
-                    if (ga.isSeatVacant(pn))
+                    if (isVacant[pn])
                     {
-                        names[pn] = names[plHighB];
-                        scores[pn] = scores[plHighB];
+                        // pn gets pnH's info
+                        names[pn] = names[pnH];
+                        scores[pn] = scores[pnH];
+                        isBot[pn] = ga.getPlayer(pnH).isRobot();
+                        isVacant[pn] = false;
+                        if (winnerPN == pnH)
+                            winnerPN = pn;
+
+                        --nVacantLow;
                         break;
                     }
                 }
             }
-        }
+            else if (nBotLow > 0)
+            {
+                // find lowest-scoring bot pn
+                int pnLowBot = -1, scoreLowBot = Integer.MAX_VALUE;
+                for (int pn = 0; pn < 4; ++pn)
+                {
+                    if ((pn == winnerPN) || ! isBot[pn])
+                        continue;
 
-        // TODO else not enough room.
-        // What if pl5 or pl6 is the winner?
-        // Replace lowest-score within first 4?
-        // Replace a robot if pl5/pl6 is a human? (What if bot won?)
+                    if ((pnLowBot == -1) || (scores[pn] < scoreLowBot))
+                    {
+                        pnLowBot = pn;
+                        scoreLowBot = scores[pn];
+                    }
+                }
+
+                final boolean pnHIsRobot = ga.getPlayer(pnH).isRobot();
+                if ((pnLowBot != -1) && ((! pnHIsRobot) || (winnerPN == pnH) || (scores[pnH] > scores[pnLowBot])))
+                {
+                    // pnLowBot gets pnH's info,
+                    // unless they're both bots and pnH didn't win and pnH's score isn't higher
+                    names[pnLowBot] = names[pnH];
+                    scores[pnLowBot] = scores[pnH];
+                    isBot[pnLowBot] = pnHIsRobot;
+                    if (winnerPN == pnH)
+                        winnerPN = pnLowBot;
+
+                    --nBotLow;
+                }
+            }
+            // else, no spot is open; this player won't be recorded
+        }
     }
 
     /**
@@ -925,6 +1121,40 @@ public class SOCDBHelper
         }
 
         return robotParams;
+    }
+
+    /**
+     * Count the number of users, if any, currently in the users table.
+     * @return User count, or -1 if not connected.
+     * @throws SQLException if unexpected problem counting the users
+     * @since 1.1.19
+     */
+    public static int countUsers()
+        throws SQLException
+    {
+        if (! checkConnection())
+            return -1;
+
+        if (userCountQuery == null)
+            return -1;  // <--- Early return: Table not found in db, is probably empty ---
+
+        try
+        {
+            ResultSet resultSet = userCountQuery.executeQuery();
+
+            int count = -1;
+            if (resultSet.next())
+                count = resultSet.getInt(1);
+
+            resultSet.close();
+            return count;
+        }
+        catch (SQLException sqlE)
+        {
+            errorCondition = true;
+            sqlE.printStackTrace();
+            throw sqlE;
+        }
     }
 
     /**
@@ -1019,6 +1249,7 @@ public class SOCDBHelper
                 lastloginUpdate.close();
                 saveGameCommand.close();
                 robotParamsQuery.close();
+                userCountQuery.close();
             }
             catch (Throwable thr)
             {
@@ -1048,7 +1279,7 @@ public class SOCDBHelper
     // dispResultSet
     // Displays all columns and rows in the given result set
     //-------------------------------------------------------------------
-    private static void dispResultSet(ResultSet rs) throws SQLException
+    static void dispResultSet(ResultSet rs) throws SQLException
     {
         System.out.println("dispResultSet()");
 

@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2007-2013 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012 Paul Bilnoski <paul@bilnoski.net> - parameterize types, removeConnection bugfix
  *
  * This program is free software; you can redistribute it and/or
@@ -83,6 +83,7 @@ import java.util.Vector;
  *  Local (StringConnection) network system by Jeremy D Monin &lt;jeremy@nand.net&gt; <br>
  *  Version-tracking system and other minor mods by Jeremy D Monin &lt;jeremy@nand.net&gt;
  */
+@SuppressWarnings("serial")  // not expecting to persist an instance between versions
 public abstract class Server extends Thread implements Serializable, Cloneable
 {
     StringServerSocket ss;
@@ -183,7 +184,7 @@ public abstract class Server extends Thread implements Serializable, Cloneable
      * same client that just disconnected, it should find both of the tasks in
      * this HashMap, call {@link TimerTask#cancel()} on them, and remove them.
      *
-     * @see #CLI_CONN_DISCON_PRINT_TIMER_FIRE_MS
+     * @see #CLI_DISCON_PRINT_TIMER_FIRE_MS
      * @since 1.1.07
      */
     public HashMap<Object, ConnExcepDelayedPrintTask> cliConnDisconPrintsPending = new HashMap<Object, ConnExcepDelayedPrintTask>();
@@ -330,7 +331,8 @@ public abstract class Server extends Thread implements Serializable, Cloneable
     /**
      * Run method for Server:
      * Start a single "treater" thread for processing inbound messages,
-     * wait for new connections, and set them up in their own threads.
+     * call the {@link #serverUp()} callback, then wait for new connections
+     * and set them up in their own threads.
      */
     @Override
     public void run()
@@ -435,7 +437,11 @@ public abstract class Server extends Thread implements Serializable, Cloneable
 
     /** 
      * Placeholder (callback) for doing things when server comes up, after the server socket
-     * is bound and listening, in the main thread.
+     * is bound and listening, in the main thread before handling any incoming connections.
+     *<P>
+     * Once this method completes, server begins its main loop of listening for incoming
+     * client connections, and starting a Thread for each one to handle that client's messages.
+     *
      * @since 1.1.09
      */
     protected void serverUp() {}
@@ -1246,10 +1252,10 @@ public abstract class Server extends Thread implements Serializable, Cloneable
      * messages from the pending vector.  This is typically done via the client's username
      * or nickname, as stored in {@link StringConnection#getData()}.
      *
-     * @author Jeremy D Monin <jeremy@nand.net>
+     * @author Jeremy D Monin &lt;jeremy@nand.net&gt;
      * @since 1.1.07
      * @see Server#addConnection(StringConnection).
-     * @see Server#CLI_CONN_DISCON_PRINT_TIMER_FIRE_MS
+     * @see Server#CLI_DISCON_PRINT_TIMER_FIRE_MS
      */
     protected class ConnExcepDelayedPrintTask extends TimerTask
     {

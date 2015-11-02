@@ -2,7 +2,7 @@
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  *
  * This file Copyright (C) 2012 Paul Bilnoski <paul@bilnoski.net>
- * Portions of this file Copyright (C) 2012-2013 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2012-2014 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -31,6 +31,7 @@ import java.awt.GridBagLayout;
 import java.awt.GridLayout;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.awt.event.KeyEvent;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -42,14 +43,23 @@ import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JTabbedPane;
+import javax.swing.KeyStroke;
 import javax.swing.SwingConstants;
 
 import soc.client.SOCPlayerInterface;
 import soc.game.SOCGame;
 import soc.game.SOCPlayer;
 
+/**
+ * Game Statistics frame.  Shows misc stats (dice roll histogram, number of rounds).
+ * If this stays visible as the game is played, the stats will update.
+ */
+@SuppressWarnings("serial")
 public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Listener
 {
+    /** i18n text strings */
+    private static final soc.util.SOCStringManager strings = soc.util.SOCStringManager.getClientManager();
+
     private final SOCPlayerInterface pi;
     private SOCGameStatistics.ListenerRegistration reg;
     private RollPanel rollPanel;
@@ -58,7 +68,7 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
 
     public GameStatisticsFrame(SOCPlayerInterface pi)
     {
-        setTitle("Game Statistics");
+        setTitle(strings.get("dialog.stats.title"));  // "Game Statistics"
         this.pi = pi;
 
         Container cpane = getContentPane();
@@ -66,13 +76,13 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
         createControls();
         pack();
     }
-    
+
     public void register(SOCGameStatistics stats)
     {
         reg = stats.addListener(this);
         statsUpdated(stats);
     }
-    
+
     @Override
     public void dispose()
     {
@@ -80,30 +90,41 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
             reg.unregister();
         super.dispose();
     }
-    
+
     public void statsUpdated(SOCGameStatistics stats)
     {
         lastStats = stats;
         rollPanel.refresh(stats);
         miscPanel.refreshFromGame();
     }
-    
+
     public void statsDisposing()
     {
         dispose();
     }
-    
+
+    /** Add rows of stats, register ESC keyboard shortcut */
     private void createControls()
     {
         JTabbedPane tabs = new JTabbedPane();
         rollPanel = new RollPanel();
-        tabs.addTab("Dice Rolls", rollPanel);
+        tabs.addTab(strings.get("dialog.stats.dice_rolls.title"), rollPanel);  // "Dice Rolls"
         getContentPane().add(tabs);
 
         tabs = new JTabbedPane();
         miscPanel = new MiscStatsPanel();
-        tabs.addTab(/*I*/"Other Stats"/*18N*/, miscPanel);
+        tabs.addTab(strings.get("dialog.stats.other_stats.title"), miscPanel);  // "Other Stats"
         getContentPane().add(tabs);
+
+        getRootPane().registerKeyboardAction
+            (new ActionListener()
+            {
+                public void actionPerformed(ActionEvent arg0)
+                {
+                    dispose();
+                }
+            },
+            KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), JComponent.WHEN_IN_FOCUSED_WINDOW);
     }
 
     /**
@@ -124,7 +145,7 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
             setLayout(gbl);
             gbc.ipadx = 8;
             gbc.ipady = 8;
-            roundNum = createStatControlRow(0, /*I*/"Current Round:"/*18N*/, gbc);
+            roundNum = createStatControlRow(0,  strings.get("dialog.stats.current_round"), gbc);  // "Current Round:"
         }
 
         /**
@@ -167,7 +188,7 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
         List<JCheckBox> playerEnabled;
         /** Displays the amounts in {@link #values} */
         private RollBar[] displays;
-        
+
         public RollPanel()
         {
             super(true);
@@ -176,17 +197,17 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
             displays = new RollBar[13];
             createControls();
         }
-        
+
         public void refresh(SOCGameStatistics stats)
         {
             if (stats == null)
                 return;
-            
-            for (int i=2; i<rollPanel.values.length; ++i)
+
+            for (int i = 2; i < rollPanel.values.length; ++i)
             {
                 int r = 0;
                 StringBuilder sb = new StringBuilder();
-                sb.append("Roll: ").append(i).append("<br/>");
+                sb.append(strings.get("dialog.stats.dice_rolls.ttip_roll", i));  // "Roll: {0}<br/>"
                 final SOCGame ga = pi.getGame();
                 for (SOCPlayer p : ga.getPlayers())
                 {
@@ -203,7 +224,7 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
                         r += v.intValue();
                     }
                 }
-                
+
                 String str = null;
                 if (sb.length() > 0)
                 {
@@ -211,11 +232,11 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
                     sb.append("</html>");
                     str = sb.toString();
                 }
-                
+
                 rollPanel.values[i] = r;
                 rollPanel.displays[i].setToolTipText(str);
             }
-            
+
             rollPanel.repaint();
         }
 
@@ -227,9 +248,9 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
             this.add(selectPanel);
             SOCPlayer[] players = pi.getGame().getPlayers();
             selectPanel.setLayout(new BoxLayout(selectPanel, BoxLayout.X_AXIS));
-            JButton all = new JButton("All");
+            JButton all = new JButton(strings.get("dialog.stats.dice_rolls.all"));  // "All" [players]
             selectPanel.add(all);
-            
+
             playerEnabled = new ArrayList<JCheckBox>();
             for (int pn = 0; pn < pi.getGame().maxPlayers; ++pn)
             {
@@ -241,7 +262,7 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
                 selectPanel.add(cb);
                 playerEnabled.add(cb);
             }
-            
+
             all.addActionListener(new ActionListener(){
                 public void actionPerformed(ActionEvent e)
                 {
@@ -250,13 +271,12 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
                     refresh(lastStats);
                 }
             });
-            
+
             JPanel displayPanel = new JPanel(true);
             this.add(displayPanel);
-            
+
             // one spot for each dice roll
             displayPanel.setLayout(new GridLayout(2, 12-2));
-//            displayPanel.setLayout(new BoxLayout(displayPanel, BoxLayout.X_AXIS));
 
             for (int i=2; i<=12; ++i)
             {
@@ -264,7 +284,7 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
                 displays[i] = lbl;
                 displayPanel.add(lbl);
             }
-            
+
             for (int i=2; i<=12; ++i)
             {
                 JLabel lbl = new JLabel(String.valueOf(i));
@@ -272,15 +292,15 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
                 displayPanel.add(lbl);
             }
         }
-        
+
         @Override
         protected void paintComponent(Graphics g)
         {
             int max = 0;
-            for (int i=2; i<values.length; ++i)
+            for (int i = 2; i < values.length; ++i)
                 max = Math.max(max, values[i]);
-            
-            for (int i=2; i<values.length; ++i)
+
+            for (int i = 2; i < values.length; ++i)
                 if (max <= 0)
                     displays[i].setValue(0,0);
                 else
@@ -288,19 +308,19 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
             super.paintComponent(g);
         }
     }
-    
+
     private class RollBar extends JComponent
     {
         private double percent;
         private int value;
-        
+
         public RollBar()
         {
             setDoubleBuffered(true);
             //setBorder(new EtchedBorder());
             value = 0;
         }
-        
+
         @Override
         public Dimension getPreferredSize()
         {
@@ -313,29 +333,29 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
                 max = 1;
             if (value < 0)
                 value = 0;
-            
+
             this.value = value;
             percent = (double)value / max;
-            
+
             if (percent < 0)
                 percent = 0;
             if (percent > 1)
                 percent = 1;
-            
+
             repaint();
         }
-        
+
         @Override
         protected void paintComponent(Graphics g)
         {
             Dimension sz = getSize();
             g.setColor(Color.BLACK);
             g.drawRect(0,0,sz.width-1, sz.height-1);
-            
+
             g.setColor(Color.BLUE);
             int h = (int)((sz.height - 1) * percent);
             g.fillRect(1, sz.height - h, sz.width-2, sz.height-2);
-            
+
             if (value > 0)
             {
                 Font BAR_FONT = new Font("SansSerif", Font.PLAIN, 12);
@@ -354,7 +374,7 @@ public class GameStatisticsFrame extends JFrame implements SOCGameStatistics.Lis
             }
         }
     }
-    
+
     private class CheckActionListener implements ActionListener
     {
         public void actionPerformed(ActionEvent e)

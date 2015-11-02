@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2009-2010,2012-2013 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2009-2010,2012-2014 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,6 +20,8 @@
  **/
 package soc.message;
 
+import soc.util.SOCServerFeatures;  // for javadocs only
+
 
 /**
  * This is a text message that shows in a status box on the client.
@@ -28,6 +30,10 @@ package soc.message;
  * or rejection if client can't join that game (or channel).
  * Also used in {@link soc.client.SOCAccountClient SOCAccountClient}
  * to tell the user if their change was made successfully.
+ *<P>
+ * Sent in response to any message type used by clients to request authentication
+ * and create or connect to a game or channel: {@link SOCJoinGame}, {@link SOCJoin},
+ * {@link SOCImARobot}, {@link SOCAuthRequest}, {@link SOCNewGameWithOptionsRequest}.
  *<P>
  * <b>Added in Version 1.1.06:</b><br>
  * Status value parameter (nonnegative integer).
@@ -49,6 +55,8 @@ package soc.message;
  */
 public class SOCStatusMessage extends SOCMessage
 {
+    private static final long serialVersionUID = 2000L;  // last structural change v2.0.00
+
     /**
      * Status value constants. SV_OK = 0 : Welcome, OK to connect.
      * SV_NOT_OK_GENERIC = 1 : Generic "not OK" status value.
@@ -68,13 +76,21 @@ public class SOCStatusMessage extends SOCMessage
     public static final int SV_NOT_OK_GENERIC = 1;
 
     /**
-     * Name not found in server's accounts = 2
+     * Name not found in server's accounts = 2.
+     * In version 1.1.19 and higher, the server never replies with this to any authentication
+     * request message type; {@link #SV_PW_WRONG} is sent even if the name doesn't exist.
      * @since 1.1.06
      */
     public static final int SV_NAME_NOT_FOUND = 2;
 
     /**
-     * Incorrect password = 3
+     * Incorrect password = 3.
+     * Also used in v1.1.19 and higher for authentication replies when the
+     * account name is not found, instead of {@link #SV_NAME_NOT_FOUND}.
+     *<P>
+     * If no password was given but the server requires passwords (a config option in
+     * server v1.1.19 and higher), it will reply with {@link #SV_PW_REQUIRED} if the
+     * client is v1.1.19 or higher, {@link #SV_PW_WRONG} if lower.
      * @since 1.1.06
      */
     public static final int SV_PW_WRONG = 3;
@@ -96,7 +112,7 @@ public class SOCStatusMessage extends SOCMessage
     public static final int SV_CANT_JOIN_GAME_VERSION = 5;
 
     /**
-     * Cannot log in due to a database problem = 6
+     * Cannot log in or create account due to a temporary database problem = 6
      * @since 1.1.06
      */
     public static final int SV_PROBLEM_WITH_DB = 6;
@@ -109,8 +125,12 @@ public class SOCStatusMessage extends SOCMessage
 
     /**
      * For account creation, an error prevented the account from
-     * being created = 8
+     * being created, or server doesn't use accounts, = 8.
+     *<P>
+     * To see whether a server v1.1.19 or newer uses accounts and passwords, check
+     * whether {@link SOCServerFeatures#FEAT_ACCTS} is sent when the client connects.
      * @since 1.1.06
+     * @see #SV_ACCT_NOT_CREATED_DENIED
      */
     public static final int SV_ACCT_NOT_CREATED_ERR = 8;
 
@@ -176,11 +196,28 @@ public class SOCStatusMessage extends SOCMessage
     public static final int SV_NEWCHANNEL_TOO_MANY_CREATED = 15;
 
     /**
+     * Password required but missing = 16.
+     * Used if server config settings require all players to have user accounts and passwords.
+     *<P>
+     * Clients older than v1.1.19 won't recognize this status value; if possible they
+     * should be sent {@link #SV_PW_WRONG} instead.
+     * @since 1.1.19
+     */
+    public static final int SV_PW_REQUIRED = 16;
+
+    /**
+     * For account creation, the requesting user's account is not authorized to create accounts = 17.
+     * @since 1.1.19
+     * @see #SV_ACCT_NOT_CREATED_ERR
+     */
+    public static final int SV_ACCT_NOT_CREATED_DENIED = 17;
+
+    /**
      * Client has connected successfully ({@link #SV_OK}) and the server's Debug Mode is on.
      * Versions older than 2.0.00 get {@link #SV_OK} instead; see {@link #toCmd(int, int, String)}.
      * @since 2.0.00
      */
-    public static final int SV_OK_DEBUG_MODE_ON = 16;
+    public static final int SV_OK_DEBUG_MODE_ON = 18;
 
     // IF YOU ADD A STATUS VALUE:
     // Be sure to update statusValidAtVersion().
@@ -376,6 +413,8 @@ public class SOCStatusMessage extends SOCMessage
             {
             if (cliVersion < 1106)
                 return (statusValue == 0);
+            else if (cliVersion < 1119)
+                return (statusValue < SV_PW_REQUIRED);
             else if (cliVersion < 2000)
                 return (statusValue < SV_OK_DEBUG_MODE_ON);
             else

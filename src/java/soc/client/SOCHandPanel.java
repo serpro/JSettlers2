@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2007-2014 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012-2013 Paul Bilnoski <paul@bilnoski.net>
  *
  * This program is free software; you can redistribute it and/or
@@ -56,6 +56,7 @@ import java.awt.event.MouseListener;
 
 import java.text.MessageFormat;
 import java.util.ArrayList;
+import java.util.MissingResourceException;
 import java.util.Timer;  // For auto-roll
 import java.util.TimerTask;
 
@@ -70,8 +71,8 @@ import javax.swing.UIManager;
  * displayed than in another player's hand panel.
  *<P>
  * To update most of the values shown in the handpanel,
- * call {@link #updateValue(int)} after receiving
- * a {@link SOCPlayerElement} message or after something
+ * call {@link #updateValue(PlayerClientListener.UpdateType)} after receiving
+ * a {@link soc.message.SOCPlayerElement} message or after something
  * else changes the game state.
  *<P>
  * Custom layout: see {@link #doLayout()}.
@@ -85,8 +86,8 @@ public class SOCHandPanel extends Panel
     /** Minimum desired width, in pixels */
     public static final int WIDTH_MIN = 218;
 
-    /** Items to update via {@link #updateValue(int)};
-     * for items not appearing in {@link SOCPlayerElement}.
+    /** Items to update via {@link #updateValue(PlayerClientListener.UpdateType)};
+     * for items not appearing in {@link soc.message.SOCPlayerElement}.
      * All these item numbers are negative, so they won't
      * conflict with any SOCPlayerElement element type.
      *<P>
@@ -268,8 +269,11 @@ public class SOCHandPanel extends Panel
      */
     private ColorSquare svpSq;
 
+    /** Largest Army label, usually invisible; placed to left of {@link #lroadLab} */
     protected JLabel larmyLab;
+    /** Longest Road label, usually invisible; placed to right of {@link #larmyLab} */
     protected JLabel lroadLab;
+
     protected ColorSquare claySq;
     protected ColorSquare oreSq;
     protected ColorSquare sheepSq;
@@ -641,12 +645,10 @@ public class SOCHandPanel extends Panel
         final Font DIALOG_PLAIN_10 = new Font("Dialog", Font.PLAIN, 10);
 
         larmyLab = new JLabel("", SwingConstants.CENTER);
-        larmyLab.setForeground(new Color(142, 45, 10));
         larmyLab.setFont(DIALOG_PLAIN_10);  // was bold 12pt SansSerif before v2.0.00 (i18n: needs room for more chars)
         add(larmyLab);
 
-        lroadLab = new JLabel("", SwingConstants.CENTER);
-        lroadLab.setForeground(new Color(142, 45, 10));
+        lroadLab = new JLabel("", SwingConstants.RIGHT);
         lroadLab.setFont(DIALOG_PLAIN_10);  // was bold 12pt SansSerif before v2.0.00
         add(lroadLab);
 
@@ -727,8 +729,7 @@ public class SOCHandPanel extends Panel
         else if (game.isGameOptionSet(SOCGameOption.K_SC_WOND))
         {
             wonderLab = new JLabel("");  // Blank at wonder level 0; other levels' text set by updateValue(WonderLevel)
-            wonderLab.setForeground(new Color(142, 45, 10));
-            wonderLab.setFont(DIALOG_PLAIN_10);  // same color and font as larmyLab, lroadLab
+            wonderLab.setFont(DIALOG_PLAIN_10);  // same font as larmyLab, lroadLab
             add(wonderLab);
         } else {
             // clothSq, clothLab, wonderLab already null
@@ -975,9 +976,13 @@ public class SOCHandPanel extends Panel
         {
             client.getGameManager().sitDown(game, playerNumber);
         }
-        else if (target == START)
+        else if ((target == START) && startBut.isVisible())
         {
             client.getGameManager().startGame(game);
+
+            // checks isVisible to guard against button action from hitting spacebar
+            // when hidden but has focus because startBut is the first button added to panel;
+            // this bug seen on OSX 10.9.1 (1.5.0 JVM)
         }
         else if (target == ROBOT)
         {
@@ -1163,7 +1168,7 @@ public class SOCHandPanel extends Panel
             for (SOCPlayer.SpecialVPInfo svpi : svpis)
             {
                 sb.append("\n");
-                sb.append(/*I*/svpi.svp+": "+svpi.desc/*18N*/);
+                sb.append(svpi.svp + ": " + svpi.desc);  // I18N: Server sends localized desc
             }
         }
 
@@ -1186,8 +1191,8 @@ public class SOCHandPanel extends Panel
      * Create and send a bank/port trade request.
      * Remember the resources for the "undo" button.
      * @param game  Our game
-     * @param give  Resources to give, same format as {@link SOCResourceSet#SOCResourceSet(int[])
-     * @param get   Resources to get, same format as {@link SOCResourceSet#SOCResourceSet(int[])
+     * @param give  Resources to give, same format as {@link SOCResourceSet#SOCResourceSet(int[])}
+     * @param get   Resources to get, same format as {@link SOCResourceSet#SOCResourceSet(int[])}
      * @since 1.1.13
      */
     private void createSendBankTradeRequest
@@ -1393,7 +1398,12 @@ public class SOCHandPanel extends Panel
             }
             else if (player.getNumPieces(SOCPlayingPiece.ROAD) == 0)
             {
-                playerInterface.printKeyed("hpan.devcards.roads.none");  // * "You have no roads left to place."
+                if (game.hasSeaBoard && (player.getNumPieces(SOCPlayingPiece.SHIP) == 0))
+                    playerInterface.printKeyed("hpan.devcards.roads_ships.none");
+                        // "You have no roads or ships left to place."
+                else
+                    playerInterface.printKeyed("hpan.devcards.roads.none");
+                        // "You have no roads left to place."
             }
             break;
 
@@ -1940,7 +1950,7 @@ public class SOCHandPanel extends Panel
         }
 
         if (wonderLab != null)
-            wonderLab.setHorizontalAlignment((playerIsClient) ? SwingConstants.RIGHT : SwingConstants.LEFT);
+            wonderLab.setHorizontalAlignment(SwingConstants.RIGHT);
 
         inPlay = true;
 
@@ -2363,11 +2373,22 @@ public class SOCHandPanel extends Panel
      * the trade offer will be refreshed after the reset is cancelled.
      *<P>
      * Does not display if playerIsClient.
+     *
+     * @param resourcesOnly  If true, instead of updating the entire offer,
+     *    only show or hide "Accept" button based on the client player's resources.
+     *    Calls {@link TradeOfferPanel#updateOfferButtons()}.
+     *    If no offer is currently visible, does nothing.
      */
-    public void updateCurrentOffer()
+    public void updateCurrentOffer(final boolean resourcesOnly)
     {
         if (inPlay)
         {
+            if (resourcesOnly)
+            {
+                offer.updateOfferButtons();
+                return;
+            }
+
             SOCTradeOffer currentOffer = player.getCurrentOffer();
 
             if (currentOffer != null)
@@ -2526,8 +2547,13 @@ public class SOCHandPanel extends Panel
             if (svpSq != null)
             {
                 final boolean vis = (! counterIsShowing) && (player.getSpecialVP() > 0);
+
                 svpLab.setVisible(vis);
                 svpSq.setVisible(vis);
+
+                // SC_WOND: wonderLab is next to svpSq
+                if (wonderLab != null)
+                    wonderLab.setVisible(vis);
             }
 
             offerCounterHidingFace = counterIsShowing;
@@ -2628,7 +2654,7 @@ public class SOCHandPanel extends Panel
             if ((! offerIsMessageWasTrade) || (! inPlay))
                 clearTradeMsg();
             else
-                updateCurrentOffer();
+                updateCurrentOffer(false);
         }
     }
 
@@ -2655,7 +2681,7 @@ public class SOCHandPanel extends Panel
      * Assumes player can't be discarding and asking for board-reset at same time.
      * Not called for the client player, only for other players.
      *<P>
-     * Normally, this will be cleared by {@link #updateValue(int)} for NUMRESOURCES,
+     * Normally, this will be cleared by {@link #updateValue(PlayerClientListener.UpdateType)} for NUMRESOURCES,
      * because that's what the server sends all other players on the player's discard or pick.
      *
      * @see #clearDiscardOrPickMsg()
@@ -2885,8 +2911,8 @@ public class SOCHandPanel extends Panel
      * If {@link #VICTORYPOINTS} is updated, and game state is {@link SOCGame#OVER}, check for winner
      * and update (player name label, victory-points tooltip, disable bank/trade btn)
      *
-     * @param vt  the type of value, such as {@link #VICTORYPOINTS}
-     *            or {@link SOCPlayerElement#SHEEP}.
+     * @param utype  the type of value update, such as {@link #VICTORYPOINTS}
+     *            or {@link PlayerClientListener.UpdateType#Sheep}.
      */
     public void updateValue(PlayerClientListener.UpdateType utype)
     {
@@ -3033,9 +3059,22 @@ public class SOCHandPanel extends Panel
                     wonderLab.setText("");
                     wonderLab.setToolTipText(null);
                 } else {
+                    String ofWonder = null;
+                    try {
+                        String sv = pWond.getStringValue();  // "w3"
+                        if (sv != null)
+                            ofWonder = strings.get("game.specitem.sc_wond.of_" + sv);  // "of the Monument"
+                    } catch (MissingResourceException e) {
+                        try {
+                            ofWonder = strings.get("game.specitem.sc_wond.of_fallback");  // "of a Wonder"
+                        }
+                        catch (MissingResourceException e2) {
+                            ofWonder = "of a Wonder";
+                        }
+                    }
                     wonderLab.setText(strings.get("hpan.wonderlevel", pLevel));  // "Wonder Level: #"
-                    wonderLab.setToolTipText(strings.get("hpan.wonderlevel.tip", pLevel));
-                        // "Player has built # levels of their Wonder."
+                    wonderLab.setToolTipText(strings.get("hpan.wonderlevel.tip", pLevel, ofWonder));
+                        // "Built # levels of the Monument"
                 }
             }
             break;
@@ -3318,6 +3357,14 @@ public class SOCHandPanel extends Panel
                 y += (lineH + 1);
                 svpLab.setBounds(inset + faceW + inset, y, vpW, lineH);
                 svpSq.setBounds(inset + faceW + inset + vpW + space, y, ColorSquare.WIDTH, ColorSquare.HEIGHT);
+
+                if (wonderLab != null)
+                {
+                    // SC_WOND: Show Wonder Level next to svpSq.
+                    // Since SC_WOND requires game.hasSeaBoard, svpSq != null for SC_WOND.
+                    final int x = svpSq.getX() + ColorSquare.WIDTH + space;
+                    wonderLab.setBounds(x, y, dim.width - x - space, lineH);
+                }
             }
 
             //if (true) {
@@ -3338,9 +3385,36 @@ public class SOCHandPanel extends Panel
                 // Bottom of panel: 1 button row: Quit to left; Roll, Restart to right
 
                 final Dimension sqpDim = sqPanel.getSize();  // Trading SquaresPanel (doesn't include Give/Get labels)
-                final int sheepW = fm.stringWidth("Sheep:_");  // Bug in stringWidth does not give correct size for ' '
+                final int labelspc = fm.stringWidth("_") / 3;  // Bug in stringWidth does not give correct size for ' '
+                final int sheepW;  // width of longest localized string clay/sheep/ore/wheat/wood
+                {
+                    int wmax = 0;
+                    final Label[] rLabs = { clayLab, oreLab, sheepLab, wheatLab, woodLab };
+                    for (int i = 0; i < rLabs.length; ++i)
+                    {
+                        final Label rl = rLabs[i];
+                        if (rl != null)
+                        {
+                            final String txt = rl.getText();
+                            if (txt != null)
+                            {
+                                final int w = fm.stringWidth(rl.getText());
+                                if (w > wmax)
+                                    wmax = w;
+                            }
+                        }
+                    }
+                    if (wmax == 0)
+                        wmax = fm.stringWidth("Sheep:");  // fallback
+
+                    sheepW = wmax + labelspc;
+                }
                 final int pcW = fm.stringWidth(CARD.replace(' ','_'));  // Bug in stringWidth
-                final int giveW = fm.stringWidth(GIVE.replace(' ','_'));  // Width of trading Give/Get labels
+                final int giveW;  // width of trading Give/Get labels
+                {
+                    final int gv = fm.stringWidth(GIVE), gt = fm.stringWidth(GET);
+                    giveW = ((gv > gt) ? gv : gt) + labelspc + 2;
+                }
                 // int clearW = fm.stringWidth(CLEAR.replace(' ','_'));
                 // int bankW = fm.stringWidth(BANK.replace(' ','_'));
                 final int resCardsH = 5 * (lineH + space);   // Clay,Ore,Sheep,Wheat,Wood
@@ -3401,12 +3475,6 @@ public class SOCHandPanel extends Panel
                 {
                     clothLab.setBounds(dim.width - inset - knightsW - ColorSquare.WIDTH - space, tradeY - (lineH + space), knightsW, lineH);
                     clothSq.setBounds(dim.width - inset - ColorSquare.WIDTH, tradeY - (lineH + space), ColorSquare.WIDTH, ColorSquare.HEIGHT);
-                }
-                else if (wonderLab != null)
-                {
-                    // Wonder Level shows above trade area, left edge is above left edge of Bank/Trade buttons
-                    final int x = tbX + tbW + space;
-                    wonderLab.setBounds(x, tradeY - (lineH + space), dim.width - x - space, lineH);
                 }
                 knightsLab.setBounds(dim.width - inset - knightsW - ColorSquare.WIDTH - space, tradeY, knightsW, lineH);
                 knightsSq.setBounds(dim.width - inset - ColorSquare.WIDTH, tradeY, ColorSquare.WIDTH, ColorSquare.HEIGHT);
@@ -3544,12 +3612,6 @@ public class SOCHandPanel extends Panel
                 {
                     clothLab.setBounds(inset, inset + balloonH, dcardsW, lineH);
                     clothSq.setBounds(inset + dcardsW + space, inset + balloonH, ColorSquare.WIDTH, ColorSquare.HEIGHT);
-                }
-                else if (wonderLab != null)
-                {
-                    // In left column and also extends to right, since this row is above Lock/Unlock button
-                    wonderLab.setBounds(inset, inset + balloonH,
-                        dim.width - (2*inset) - stlmtsW - ColorSquare.WIDTH - (2*space), lineH);
                 }
 
                 // Lower-right: Column of piece counts:

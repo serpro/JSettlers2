@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2007-2013 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2014 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012 Paul Bilnoski <paul@bilnoski.net>
  *
  * This program is free software; you can redistribute it and/or
@@ -74,7 +74,7 @@ import java.util.Vector;
  *  keeping track of which pieces support the building of others."
  *</blockquote>
  *<p>
- *  For a legible overview of the data in a SOCPlayerTracker, use {@link #playerTrackersDebug(HashMap)}.
+ *  To output a legible overview of the data in a SOCPlayerTracker, use {@link #playerTrackersDebug(HashMap)}.
  *
  * @author Robert S Thomas
  */
@@ -90,11 +90,11 @@ public class SOCPlayerTracker
     static protected int EXPAND_LEVEL = 1;
 
     /**
-     * Ship expansion level to add to {@link #EXPAND_LEVEL} for
+     * Ship route length expansion level to add to {@link #EXPAND_LEVEL} for
      * {@link #expandRoadOrShip(SOCPossibleRoad, SOCPlayer, SOCPlayer, HashMap, int)}.
      * @since 2.0.00
      */
-    static protected int EXPAND_LEVEL_SHIP_EXTRA = 1;
+    static protected int EXPAND_LEVEL_SHIP_EXTRA = 2;
 
     /**
      * Road expansion level for {@link #updateLRPotential(SOCPossibleRoad, SOCPlayer, SOCRoad, int, int)};
@@ -449,7 +449,9 @@ public class SOCPlayerTracker
     }
 
     /**
-     * @return the list of possible roads and ships
+     * Get the possible roads and ships ({@link SOCPossibleRoad}, {@link SOCPossibleShip}).
+     * Treat the structure of the returned map as read-only, don't add or remove anything.
+     * @return the Map of coordinates to possible roads and ships
      */
     public TreeMap<Integer, SOCPossibleRoad> getPossibleRoads()
     {
@@ -473,7 +475,11 @@ public class SOCPlayerTracker
     }
 
     /**
+     * Get the ETA to take Longest Road.
+     * Updated in {@link #updateWinGameETAs(HashMap)} or {@link #recalcLongestRoadETA()}.
      * @return the longest road eta
+     * @see #needsLR()
+     * @see #getRoadsToGo()
      */
     public int getLongestRoadETA()
     {
@@ -481,7 +487,11 @@ public class SOCPlayerTracker
     }
 
     /**
+     * Get how many roads must be built to take Longest Road.
+     * Updated in {@link #updateWinGameETAs(HashMap)} and {@link #recalcLongestRoadETA()}.
      * @return how many roads needed to build to take longest road
+     * @see #needsLR()
+     * @see #getLongestRoadETA()
      */
     public int getRoadsToGo()
     {
@@ -489,7 +499,11 @@ public class SOCPlayerTracker
     }
 
     /**
+     * Get the ETA to take Largest Army.
+     * Updated in {@link #updateWinGameETAs(HashMap)} and {@link #recalcLargestArmyETA()}.
      * @return largest army eta
+     * @see #needsLA()
+     * @see #getKnightsToBuy()
      */
     public int getLargestArmyETA()
     {
@@ -497,7 +511,11 @@ public class SOCPlayerTracker
     }
 
     /**
+     * Get the number of knights needed to take Largest Army.
+     * Updated in {@link #updateWinGameETAs(HashMap)} and {@link #recalcLargestArmyETA()}.
      * @return the number of knights to buy to get LA
+     * @see #needsLA()
+     * @see #getLargestArmyETA()
      */
     public int getKnightsToBuy()
     {
@@ -584,7 +602,7 @@ public class SOCPlayerTracker
      * Add one of our roads or ships that has just been built.
      * Look for new adjacent possible settlements.
      * Calls {@link #expandRoadOrShip(SOCPossibleRoad, SOCPlayer, SOCPlayer, HashMap, int)}
-     * on newly possible adjacent roads.
+     * on newly possible adjacent roads or ships.
      *
      * @param road         the road or ship
      * @param trackers     player trackers for the players
@@ -756,14 +774,24 @@ public class SOCPlayerTracker
                     if (edgeRequiresCoastalSettlement)
                     {
                         isRoad = ! isRoad;
-                        roadsBetween = 2;
+                        roadsBetween = 2;  // roughly account for effort & cost of new settlement
                     } else {
                         roadsBetween = 0;
                     }
-                    if (isRoad)
+
+                    // use coastal road/ship type (isCoastalRoadAndShip) only if we can
+                    // require a coastal settlement to switch from road-only or ship-only
+                    final boolean isCoastal = edgeRequiresCoastalSettlement
+                        && player.isPotentialRoad(edge) && player.isPotentialShip(edge);
+
+                    if (isRoad && ! isCoastal)
+                    {
                         newPR = new SOCPossibleRoad(player, edge, null);
-                    else
-                        newPR = new SOCPossibleShip(player, edge, null);
+                    } else {
+                        newPR = new SOCPossibleShip(player, edge, isCoastal, null);
+                        System.err.println
+                            ("L793: " + toString() + ": new PossibleShip(" + isCoastal + ") at 0x" + Integer.toHexString(edge));
+                    }
                     newPR.setNumberOfNecessaryRoads(roadsBetween);  // 0 unless requires settlement
                     newPossibleRoads.addElement(newPR);
                     roadsToExpand.addElement(newPR);
@@ -826,8 +854,10 @@ public class SOCPlayerTracker
         SOCBoard board = game.getBoard();
         final int tgtRoadEdge = targetRoad.getCoordinates();
         SOCRoad dummyRoad;
-        if (targetRoad.isRoadNotShip())
+        if ((targetRoad.isRoadNotShip()
+            || ((targetRoad instanceof SOCPossibleShip) && ((SOCPossibleShip) targetRoad).isCoastalRoadAndShip)))
             dummyRoad = new SOCRoad(dummy, tgtRoadEdge, board);
+            // TODO better handling for coastal roads/ships
         else
             dummyRoad = new SOCShip(dummy, tgtRoadEdge, board);
         dummy.putPiece(dummyRoad, true);
@@ -1012,7 +1042,7 @@ public class SOCPlayerTracker
                     else
                     {
                         //
-                        // else, add new possible road
+                        // else, add new possible road or ship
                         //
                         //D.ebugPrintln("$$$ adding new pr at "+Integer.toHexString(adjEdge.intValue()));
                         Vector<SOCPossibleRoad> neededRoads = new Vector<SOCPossibleRoad>();
@@ -1022,10 +1052,24 @@ public class SOCPlayerTracker
                         boolean isRoad = targetRoad.isRoadNotShip();
                         if (edgeRequiresCoastalSettlement)
                             isRoad = ! isRoad;
-                        if (isRoad)
+
+                        // use coastal road/ship type (isCoastalRoadAndShip) only if the road/ship
+                        // being expanded is coastal, or if we can require a coastal settlement to
+                        // switch from road-only or ship-only
+                        final boolean isCoastal =
+                            dummy.isPotentialRoad(edge) && dummy.isPotentialShip(edge)
+                            && (edgeRequiresCoastalSettlement
+                                || ((targetRoad instanceof SOCPossibleShip)
+                                    && ((SOCPossibleShip) targetRoad).isCoastalRoadAndShip));
+
+                        if (isRoad && ! isCoastal)
+                        {
                             newPR = new SOCPossibleRoad(player, edge, neededRoads);
-                        else
-                            newPR = new SOCPossibleShip(player, edge, neededRoads);
+                        } else {
+                            newPR = new SOCPossibleShip(player, edge, isCoastal, neededRoads);
+                            System.err.println
+                                ("L1072: " + toString() + ": new PossibleShip(" + isCoastal + ") at 0x" + Integer.toHexString(edge));
+                        }
                         newPR.setNumberOfNecessaryRoads(targetRoad.getNumberOfNecessaryRoads() + incrDistance);
                         targetRoad.addNewPossibility(newPR);
                         newPossibleRoads.addElement(newPR);
@@ -1326,7 +1370,9 @@ public class SOCPlayerTracker
     }
 
     /**
-     * add a settlement that has just been built
+     * Add a settlement that has just been built.
+     * Called only after {@link SOCGame#putPiece(SOCPlayingPiece)}
+     * or {@link SOCGame#putTempPiece(SOCPlayingPiece)}.
      *
      * @param settlement       the settlement
      * @param trackers         player trackers for the players
@@ -1374,9 +1420,14 @@ public class SOCPlayerTracker
     /**
      * Add one of our settlements, and newly possible pieces from it.
      * Adds a new possible city; removes conflicting possible settlements (ours or other players).
-     * On the large Sea board, if this is a coastal settlement, adds newly possible ships, and if
+     * On the large Sea board, if this is a coastal settlement adds newly possible ships, and if
      * we've just settled a new island, newly possible roads, because the coastal settlement is
      * a roads {@literal <->} ships transition.
+     *<P>
+     * Newly possible roads or ships next to the settlement are expanded by calling
+     * {@link #expandRoadOrShip(SOCPossibleRoad, SOCPlayer, SOCPlayer, HashMap, int)}.
+     * {@link #EXPAND_LEVEL} is the basic expansion length, and ships add
+     * {@link #EXPAND_LEVEL_SHIP_EXTRA} to that for crossing the sea to nearby islands.
      *<P>
      * Called in 2 different conditions:
      *<UL>
@@ -1547,15 +1598,41 @@ public class SOCPlayerTracker
         }
 
         /**
-         * add possible road-ship transitions made possible by the new settlement
+         * Add possible road-ship transitions made possible by the new settlement.
+         * Normally a new settlement placement doesn't need to add possible roads or ships,
+         * because each road/ship placement adds possibles past the new far end of the route
+         * in addOurNewRoadOrShip.
          */
         if (board instanceof SOCBoardLarge)
         {
             Vector<SOCPossibleRoad> roadsToExpand = null;
+
+            /**
+             * Only add new possible roads if we're on a new island
+             * (that is, the newly placed settlement has no adjacent roads already).
+             * Coastal ships/roads may still be added even if settleAlreadyHasRoad.
+             */
             boolean settleAlreadyHasRoad = false;
             Vector<SOCPossibleRoad> possibleNewIslandRoads = null;
 
-            for (Integer edge : board.getAdjacentEdgesToNode(settlementCoords))
+            final Vector<Integer> adjacEdges = board.getAdjacentEdgesToNode(settlementCoords);
+
+            // First, loop to check for settleAlreadyHasRoad
+            for (Integer edge : adjacEdges)
+            {
+                if (possibleRoads.get(edge) != null)
+                    continue;  // already a possible road or ship here
+
+                SOCRoad road = board.roadAtEdge(edge);
+                if ((road != null) && road.isRoadNotShip())
+                {
+                    settleAlreadyHasRoad = true;
+                    break;
+                }
+            }
+
+            // Now, possibly add new roads/ships/coastals
+            for (Integer edge : adjacEdges)
             {
                 // TODO remove these debug prints soon
                 //System.err.println("L1348: examine edge 0x"
@@ -1572,34 +1649,37 @@ public class SOCPlayerTracker
                     continue;  // already a possible road or ship
                 }
 
-                SOCRoad road = board.roadAtEdge(edge);
-                if (road != null)
+                if (board.roadAtEdge(edge) != null)
                 {
-                    if (road.isRoadNotShip())
-                        settleAlreadyHasRoad = true;
-                    continue;  // something's already there
+                    continue;  // not new, something's already there
                 }
-
-                // TODO what if isEdgeCoastline -- for now, until we can model that & add both potentials, assume road
 
                 if (player.isPotentialRoad(edge))
                 {
-                    // Probably won't happen (usually added elsewhere),
+                    // Add newly possible roads from settlement placement.
+                    // Probably won't need to happen (usually added in addOurNewRoadOrShip, see newPossibleRoads)
                     // but could on a new island's first settlement
-                    if (settleAlreadyHasRoad)
+
+                    final boolean isCoastline = player.isPotentialShip(edge);
+                    if (settleAlreadyHasRoad && ! isCoastline)
                         continue;
+
                     if (possibleNewIslandRoads == null)
                         possibleNewIslandRoads = new Vector<SOCPossibleRoad>();
-                    possibleNewIslandRoads.add(new SOCPossibleRoad(player, edge, null));
+                    possibleNewIslandRoads.add( (isCoastline)
+                        ? new SOCPossibleShip(player, edge, true, null)
+                        : new SOCPossibleRoad(player, edge, null));
+                    if (isCoastline)
+                        System.err.println
+                            ("L1675: " + toString() + ": new PossibleShip(true) at 0x" + Integer.toHexString(edge));
                 }
                 else if (player.isPotentialShip(edge))
                 {
                     // A way out to a new island
-                    SOCPossibleShip newPS = new SOCPossibleShip(player, edge, null);
+                    SOCPossibleShip newPS = new SOCPossibleShip(player, edge, false, null);
                     possibleRoads.put(edge, newPS);
-                    System.err.println("L1383: new possible ship at edge 0x"
-                        + Integer.toHexString(edge) + " from coastal settle 0x"
-                        + Integer.toHexString(settlementCoords));
+                    System.err.println("L1685: " + toString() + ": new PossibleShip(false) at 0x" + Integer.toHexString(edge)
+                        + " from coastal settle 0x" + Integer.toHexString(settlementCoords));
                     if (roadsToExpand == null)
                         roadsToExpand = new Vector<SOCPossibleRoad>();
                     roadsToExpand.addElement(newPS);
@@ -1607,7 +1687,7 @@ public class SOCPlayerTracker
                 }
             }
 
-            if ((possibleNewIslandRoads != null) && (! settleAlreadyHasRoad)
+            if ((possibleNewIslandRoads != null)
                 && ! player.getGame().isInitialPlacement())
             {
                 // only add new possible roads if we're on a new island
@@ -2034,7 +2114,7 @@ public class SOCPlayerTracker
                         if (adjEdge == realRoad.getCoordinates())
                         {
                             /**
-                             * found a supporting road, now find the node between
+                             * found an adjacent supporting road, now find the node between
                              * the supporting road and the possible road
                              */
                             final int[] adjNodesToRealRoad = realRoad.getAdjacentNodes();
@@ -2121,7 +2201,11 @@ public class SOCPlayerTracker
                 {
                     SOCPossiblePiece curPosPiece = stack.pop();
 
-                    if (curPosPiece.getType() == SOCPossiblePiece.ROAD)
+                    // TODO roads only; need to also decide how ships are threatened
+
+                    if ((curPosPiece.getType() == SOCPossiblePiece.ROAD)
+                        || ((curPosPiece instanceof SOCPossibleShip)
+                             && ((SOCPossibleShip) curPosPiece).isCoastalRoadAndShip))
                     {
                         Enumeration<SOCPossiblePiece> newPosEnum = ((SOCPossibleRoad) curPosPiece).getNewPossibilities().elements();
 
@@ -2129,7 +2213,9 @@ public class SOCPlayerTracker
                         {
                             SOCPossiblePiece newPosPiece = newPosEnum.nextElement();
 
-                            if (newPosPiece.getType() == SOCPossiblePiece.ROAD)
+                            if ((newPosPiece.getType() == SOCPossiblePiece.ROAD)
+                                || ((newPosPiece instanceof SOCPossibleShip)
+                                    && ((SOCPossibleShip) newPosPiece).isCoastalRoadAndShip))
                             {
                                 Vector<SOCPossibleRoad> necRoadVec = ((SOCPossibleRoad) newPosPiece).getNecessaryRoads();
 
@@ -2364,6 +2450,7 @@ public class SOCPlayerTracker
     /**
      * Calculate the longest road ETA.
      * Always 500 or more if {@link SOCGameOption#K_SC_0RVP} is set.
+     * Updates fields for {@link #getLongestRoadETA()} and {@link #getRoadsToGo()}.
      */
     public void recalcLongestRoadETA()
     {
@@ -2535,8 +2622,9 @@ public class SOCPlayerTracker
                 // calc longest road value
                 //
                 SOCRoad dummyRoad;
-                if (posRoad.isRoadNotShip())
-                    dummyRoad = new SOCRoad(dummy, posRoad.getCoordinates(), null);
+                if (posRoad.isRoadNotShip()
+                    || ((posRoad instanceof SOCPossibleShip) && ((SOCPossibleShip) posRoad).isCoastalRoadAndShip))
+                    dummyRoad = new SOCRoad(dummy, posRoad.getCoordinates(), null);  // TODO better coastal handling
                 else
                     dummyRoad = new SOCShip(dummy, posRoad.getCoordinates(), null);
                 dummy.putPiece(dummyRoad, true);
@@ -2658,6 +2746,8 @@ public class SOCPlayerTracker
     }
 
     /**
+     * Get the calculated Winning the Game ETA (WGETA), based on
+     * the most recent call to {@link #recalcWinGameETA()}.
      * @return the ETA for winning the game
      */
     public int getWinGameETA()
@@ -2666,7 +2756,11 @@ public class SOCPlayerTracker
     }
 
     /**
+     * Does this player need Longest Road to win?
+     * Updated by {@link #recalcWinGameETA()}.
      * @return true if this player needs LR to win
+     * @see #getLongestRoadETA()
+     * @see #getRoadsToGo()
      */
     public boolean needsLR()
     {
@@ -2674,7 +2768,11 @@ public class SOCPlayerTracker
     }
 
     /**
+     * Does this player need Largest Army to win?
+     * Updated by {@link #recalcWinGameETA()}.
      * @return true if this player needs LA to win
+     * @see #getLargestArmyETA()
+     * @see #getKnightsToBuy()
      */
     public boolean needsLA()
     {
@@ -2682,7 +2780,30 @@ public class SOCPlayerTracker
     }
 
     /**
-     * recalculate the ETA for winning the game
+     * Recalculate the tracked player's ETA for winning the game (WGETA) by making and simulating with a copy
+     * of our current potential settlement/city locations, building speed estimates (BSEs), and dice numbers,
+     * looping from player's current {@link SOCPlayer#getTotalVP()} to {@link SOCGame#vp_winner}.
+     *<P>
+     * Calculates the fields for {@link #getWinGameETA()}, {@link #needsLA()}, {@link #needsLR()}.
+     *<P>
+     * Each time through the loop, given potential locations and available pieces, pick the fastest ETA
+     * among each of these 2-VP combinations:
+     *<UL>
+     * <LI> 2 settlements (including necessary roads' ETA)
+     * <LI> 2 cities
+     * <LI> 1 city, 1 settlement (+ roads)
+     * <LI> 1 settlement (+ roads), 1 city
+     * <LI> Buy enough cards for Largest Army
+     * <LI> Build enough roads for Longest Road
+     *</UL>
+     * The temporary potential sets, port trade flags, BSEs and dice numbers are updated with the picked pieces.
+     * The loop body doesn't add new potential roads/ships or potential settlements to its copy of those sets,
+     * or call {@link #expandRoadOrShip(SOCPossibleRoad, SOCPlayer, SOCPlayer, HashMap, int)}, so it may run out
+     * of potential locations before {@code vp_winner} is reached.  If the loop doesn't have the locations or
+     * pieces to do anything, 500 ETA and 2 VP are added to the totals to keep things moving.
+     *<P>
+     * If the loop reaches {@link SOCGame#vp_winner} - 1, it calculates ETAs for 1 city or settlement (+ roads)
+     * instead of 2, and Largest Army and Longest Road, to make its choice.
      */
     public void recalcWinGameETA()
     {
@@ -2867,6 +2988,16 @@ public class SOCPlayerTracker
                                             SOCPossibleRoad nr = necRoadEnum.nextElement();
                                             necRoadQueue.put(new Pair<Integer, Vector<SOCPossibleRoad>>
                                                 (Integer.valueOf(totalNecRoads + 1), nr.getNecessaryRoads()));
+                                        }
+
+                                        if (necRoadQueue.size() > 100)
+                                        {
+                                            // Too many necessary, or dupes led to loop. Bug in necessary road construction?
+                                            System.err.println
+                                                ("PT.recalcWinGameETA L2997: Necessary Road Path too long for settle at 0x"
+                                                 + Integer.toHexString(chosenSet.getCoordinates()));
+                                            totalNecRoads = 100;
+                                            break;
                                         }
                                     }
                                 }
@@ -3187,6 +3318,16 @@ public class SOCPlayerTracker
                                                 necRoadQueue.put(new Pair<Integer, Vector<SOCPossibleRoad>>
                                                     (Integer.valueOf(totalNecRoads + 1), nr.getNecessaryRoads()));
                                             }
+
+                                            if (necRoadQueue.size() > 100)
+                                            {
+                                                // Too many necessary, or dupes led to loop. Bug in necessary road construction?
+                                                System.err.println
+                                                    ("PT.recalcWinGameETA L3326: Necessary Road Path too long for settle at 0x"
+                                                     + Integer.toHexString(chosenSet[i].getCoordinates()));
+                                                totalNecRoads = 100;
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -3481,6 +3622,16 @@ public class SOCPlayerTracker
                                         SOCPossibleRoad nr = necRoadEnum.nextElement();
                                         necRoadQueue.put(new Pair<Integer, Vector<SOCPossibleRoad>>
                                             (Integer.valueOf(totalNecRoads + 1), nr.getNecessaryRoads()));
+                                    }
+
+                                    if (necRoadQueue.size() > 100)
+                                    {
+                                        // Too many necessary. Bug in necessary road construction?
+                                        System.err.println
+                                            ("PT.recalcWinGameETA L3631: Necessary Road Path too long for settle at 0x"
+                                             + Integer.toHexString(chosenSet[0].getCoordinates()));
+                                        totalNecRoads = 100;
+                                        break;
                                     }
                                 }
                             }
@@ -4143,4 +4294,20 @@ public class SOCPlayerTracker
             }
         }
     }
+
+    /**
+     * SOCPlayerTracker key fields (brain player name, tracked player name) to aid debugging.
+     * Since PTs are copied a lot and we need a way to tell the copies apart, also includes
+     * hex {@code super.}{@link Object#hashCode() hashCode()}.
+     * @return This SOCPlayerTracker's fields, in the format:
+     *     <tt>SOCPlayerTracker@<em>hashCode</em>[<em>brainPlayerName</em>, pl=<em>trackedPlayerName</em>]</tt>
+     * @since 2.0.00
+     */
+    @Override
+    public String toString()
+    {
+        return "SOCPlayerTracker@" + Integer.toHexString(super.hashCode())
+            + "[" + brain.getOurPlayerData().getName() + ", pl=" + player.getName() + "]";
+    }
+
 }

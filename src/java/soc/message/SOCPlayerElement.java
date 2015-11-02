@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2009-2013 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2009-2014 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -35,6 +35,8 @@ import java.util.StringTokenizer;
 public class SOCPlayerElement extends SOCMessage
     implements SOCMessageForGame
 {
+    private static final long serialVersionUID = 2000L;  // last structural change v2.0.00
+
     /**
      * player element types.  CLAY has same value
      * as {@link soc.game.SOCResourceConstants#CLAY};
@@ -49,6 +51,7 @@ public class SOCPlayerElement extends SOCMessage
     public static final int ROADS = 10;
     public static final int SETTLEMENTS = 11;
     public static final int CITIES = 12;
+
     /**
      * Number of SHIP pieces; added in v2.0.00.
      * @since 2.0.00 
@@ -183,9 +186,9 @@ public class SOCPlayerElement extends SOCMessage
      * Create a PlayerElement message.
      *
      * @param ga  name of the game
-     * @param pn  the player number; v2.0.00+ allows -1 for some elements (applies to board or to all players).
+     * @param pn  the player number; v1.1.19 and newer allow -1 for some elements (applies to board or to all players).
      *            Earlier client versions will throw an exception accessing player -1.
-     *            If the element allows -1, its constant's javadoc will mention that.
+     *            If the element type allows -1, its constant's javadoc will mention that.
      * @param ac  the type of action: {@link #SET}, {@link #GAIN}, or {@link #LOSE}
      * @param et  the type of element, such as {@link #SETTLEMENTS}
      * @param va  the value of the element
@@ -210,9 +213,9 @@ public class SOCPlayerElement extends SOCMessage
 
     /**
      * Get this element's player number.
-     * v2.0.00+ allows -1 for some elements (applies to board or to all players).
+     * v1.1.19 and newer allow -1 for some elements (applies to board or to all players).
      * Earlier client versions will throw an exception accessing player -1.
-     * If the element allows -1, its constant's javadoc will mention that.
+     * If the element type allows -1, its constant's javadoc will mention that.
      * @return the player number
      */
     public int getPlayerNumber()
@@ -222,7 +225,7 @@ public class SOCPlayerElement extends SOCMessage
 
     /**
      * Get the type of action.
-     * @return the action type: {@link #GAIN}, {@link #LOSE} or {@link #SET}
+     * @return the action type: {@link #SET}, {@link #GAIN}, or {@link #LOSE}
      */
     public int getAction()
     {
@@ -230,7 +233,7 @@ public class SOCPlayerElement extends SOCMessage
     }
 
     /**
-     * Get the element type, the part of the player's info that is changing.
+     * Get the element type, the type of info that is changing.
      * @return the element type, such as {@link #SETTLEMENTS} or {@link #NUMKNIGHTS}
      */
     public int getElementType()
@@ -240,7 +243,7 @@ public class SOCPlayerElement extends SOCMessage
 
     /**
      * Get the new value to set, or the delta to gain/lose.
-     * @return the element for player to {@link #GAIN}, {@link #LOSE} or {@link #SET}
+     * @return the amount to {@link #SET}, {@link #GAIN}, or {@link #LOSE}
      */
     public int getValue()
     {
@@ -261,9 +264,9 @@ public class SOCPlayerElement extends SOCMessage
      * PLAYERELEMENT sep game sep2 playerNumber sep2 actionType sep2 elementType sep2 value
      *
      * @param ga  the game name
-     * @param pn  the player number; v2.0.00+ allows -1 for some elements (applies to board or to all players).
+     * @param pn  the player number; v1.1.19 and newer allow -1 for some elements (applies to board or to all players).
      *            Earlier client versions will throw an exception accessing player -1.
-     *            If the element allows -1, its constant's javadoc will mention that.
+     *            If the element type allows -1, its constant's javadoc will mention that.
      * @param ac  the type of action
      * @param et  the type of element
      * @param va  the value of the element
@@ -311,7 +314,8 @@ public class SOCPlayerElement extends SOCMessage
      */
     public String toString()
     {
-        String s = "SOCPlayerElement:game=" + game + "|playerNum=" + playerNumber + "|actionType=" + actionType + "|elementType=" + elementType + "|value=" + value;
+        String s = "SOCPlayerElement:game=" + game + "|playerNum=" + playerNumber + "|actionType=" + actionType
+            + "|elementType=" + elementType + "|value=" + value;
 
         return s;
     }

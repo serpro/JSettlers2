@@ -3,7 +3,7 @@
  * This file copyright (C) 2008 Christopher McNeil <http://sourceforge.net/users/cmcneil>
  * Portions of this file copyright (C) 2003-2004 Robert S. Thomas
  * Portions of this file copyright (C) 2008 Eli McGowan <http://sourceforge.net/users/emcgowan>
- * Portions of this file copyright (C) 2009,2012-2013 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file copyright (C) 2009,2012-2013,2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012 Paul Bilnoski <paul@bilnoski.net>
  *
  * This program is free software; you can redistribute it and/or
@@ -28,10 +28,8 @@ import java.util.Stack;
 
 // import org.apache.log4j.Logger;
 
-import soc.disableDebug.D;
 import soc.game.SOCGame;
 import soc.game.SOCPlayer;
-import soc.game.SOCPlayingPiece;
 import soc.game.SOCResourceConstants;
 import soc.game.SOCResourceSet;
 import soc.util.SOCRobotParameters;
@@ -74,31 +72,28 @@ public class DiscardStrategy {
             decisionMaker.planStuff(robotParameters.getStrategyType());
         }
 
-        if (!buildingPlan.empty())
+        if (! buildingPlan.empty())
         {
             SOCPossiblePiece targetPiece = buildingPlan.peek();
             negotiator.setTargetPiece(ourPlayerData.getPlayerNumber(), targetPiece);
 
             //log.debug("targetPiece="+targetPiece);
-            SOCResourceSet targetResources = SOCPlayingPiece.getResourcesToBuild(targetPiece.getType());
+
+            final SOCResourceSet targetResources = targetPiece.getResourcesToBuild();
+                // may be null
 
             /**
              * figure out what resources are NOT the ones we need
              */
             SOCResourceSet leftOvers = ourPlayerData.getResources().copy();
 
-            for (int rsrc = SOCResourceConstants.CLAY;
-                    rsrc <= SOCResourceConstants.WOOD; rsrc++)
-            {
-                if (leftOvers.getAmount(rsrc) > targetResources.getAmount(rsrc))
-                {
-                    leftOvers.subtract(targetResources.getAmount(rsrc), rsrc);
-                }
-                else
-                {
-                    leftOvers.setAmount(0, rsrc);
-                }
-            }
+            if (targetResources != null)
+                for (int rsrc = SOCResourceConstants.CLAY;
+                         rsrc <= SOCResourceConstants.WOOD; rsrc++)
+                    if (leftOvers.getAmount(rsrc) > targetResources.getAmount(rsrc))
+                        leftOvers.subtract(targetResources.getAmount(rsrc), rsrc);
+                    else
+                        leftOvers.setAmount(0, rsrc);
 
             SOCResourceSet neededRsrcs = ourPlayerData.getResources().copy();
             neededRsrcs.subtract(leftOvers);

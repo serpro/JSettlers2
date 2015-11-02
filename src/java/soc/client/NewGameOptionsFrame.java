@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas
- * This file copyright (C) 2009-2014 Jeremy D Monin <jeremy@nand.net>
+ * This file copyright (C) 2009-2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012-2013 Paul Bilnoski <paul@bilnoski.net>
  *
  * This program is free software; you can redistribute it and/or
@@ -46,10 +46,16 @@ import java.awt.event.TextEvent;
 import java.awt.event.TextListener;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+
+import javax.swing.JComboBox;
 
 import soc.client.SOCPlayerClient.GameAwtDisplay;
 import soc.game.SOCGame;
@@ -71,12 +77,13 @@ import soc.util.Version;
  * call {@link #setVisible(boolean)} instead of {@link #requestFocus()}.
  *<P>
  * Game option "SC" (Scenarios) gets special rendering. Internally it's {@link SOCGameOption#OTYPE_STR},
- * but it's presented as a checkbox and {@link Choice}.
+ * but it's presented as a checkbox and {@link Choice}. When a scenario is picked in the Choice,
+ * related options are updated by "SC"'s {@link SOCGameOption.ChangeListener}.
  *<P>
  * This class also contains the "Scenario Info" popup window, called from
  * this dialog's Scenario Info button, and from {@link SOCPlayerInterface}
  * when first joining a game with a scenario.
- * See {@link #showScenarioInfoDialog(String, Map, int, GameAwtDisplay, Frame)}.
+ * See {@link #showScenarioInfoDialog(SOCScenario, Map, int, SOCPlayerClient.GameAwtDisplay, Frame)}.
  *
  * @author Jeremy D Monin &lt;jeremy@nand.net&gt;
  * @since 1.1.07
@@ -92,7 +99,7 @@ public class NewGameOptionsFrame extends Frame
      */
     public static final int INTFIELD_POPUP_MAXRANGE = 21;
 
-    private final GameAwtDisplay gameDisplay;
+    private final SOCPlayerClient.GameAwtDisplay gameDisplay;
 
     /** should this be sent to the remote tcp server, or local practice server? */
     private final boolean forPractice;
@@ -127,6 +134,8 @@ public class NewGameOptionsFrame extends Frame
      * Null if {@link #readOnly}.
      * For game options with 2 input controls (OTYPE_INTBOOL, OTYPE_ENUMBOOL),
      * the TextField/Choice is found here, and the boolean Checkbox is found in {@link #boolOptCheckboxes}.
+     * The scenario dropdown (option {@code "SC"}) uses a {@code JComboBox} control holding
+     * {@link SOCScenario} objects and the string "(none)".
      * @since 1.1.13
      * @see #fireOptionChangeListener(soc.game.SOCGameOption.ChangeListener, SOCGameOption, Object, Object)
      */
@@ -139,15 +148,24 @@ public class NewGameOptionsFrame extends Frame
     private Map<String, Checkbox> boolOptCheckboxes;
 
     /**
-     * Scenario choice dropdown, if {@link #opts} contains the {@code "SC"} game option, or null.
-     * When an item is selected, {@link #itemStateChanged(ItemEvent)} reacts specially for this control
+     * Scenario info for {@link #scenDropdown}, if {@link #opts} contains the {@code "SC"} game option, or null.
+     * Initialized from {@link SOCScenario#getAllKnownScenarios()} during
+     * {@link #initInterface_Options(Panel, GridBagLayout, GridBagConstraints)},
+     * which is called after any server negotiations.
+     * @since 2.0.00
+     */
+    private Map<String, SOCScenario> allSc;
+
+    /**
+     * Scenario choice dropdown if {@link #opts} contains the {@code "SC"} game option, or null.
+     * When an item is selected, {@link #actionPerformed(ActionEvent)} reacts specially for this control
      * to update {@code "SC"} within {@link #opts} and enable/disable {@link #scenInfo}.
      * @since 2.0.00
      */
-    private Choice scenChoice;
+    private JComboBox scenDropdown;
 
     /**
-     * Scenario Info button, for info window about {@link #scenChoice}'s selected scenario, or null.
+     * Scenario Info button, for info window about {@link #scenDropdown}'s selected scenario, or null.
      * @see #clickScenarioInfo()
      * @since 2.0.00
      */
@@ -176,7 +194,7 @@ public class NewGameOptionsFrame extends Frame
      * Creates a new NewGameOptionsFrame.
      * Once created, reset the mouse cursor from hourglass to normal, and clear main panel's status text.
      *
-     * @param cli      Player client interface
+     * @param gd      Game display interface
      * @param gaName   Name of existing game,
      *                 or null for new game; will be blank or (forPractice)
      *                 to use {@link SOCPlayerClient#DEFAULT_PRACTICE_GAMENAME}.
@@ -244,7 +262,7 @@ public class NewGameOptionsFrame extends Frame
     /**
      * Creates and shows a new NewGameOptionsFrame.
      * Once created, reset the mouse cursor from hourglass to normal, and clear main panel's status text.
-     * See {@link #NewGameOptionsFrame(SOCPlayerClient, String, Map, boolean, boolean) constructor}
+     * See {@link #NewGameOptionsFrame(SOCPlayerClient.GameAwtDisplay, String, Map, boolean, boolean) constructor}
      * for notes about <tt>opts</tt> and other parameters.
      * @param gaName  Name of existing game, or {@code null} to show options for a new game;
      *     see constructor for details
@@ -275,9 +293,9 @@ public class NewGameOptionsFrame extends Frame
         gbc.fill = GridBagConstraints.BOTH;
         gbc.gridwidth = GridBagConstraints.REMAINDER;
 
-        if (! readOnly)
+        if ((! readOnly) && (opts != null))
         {
-            msgText = new TextField(strings.get("game.options.prompt"));
+            msgText = new TextField(strings.get("game.options.prompt"));  // "Choose options for the new game."
             msgText.setEditable(false);
             msgText.setForeground(LABEL_TXT_COLOR);
             msgText.setBackground(getBackground());
@@ -375,7 +393,7 @@ public class NewGameOptionsFrame extends Frame
      * If not read-only, clear {@link SOCGameOption#userChanged} flag for
      * each option in {@link #opts}.
      *<P>
-     * If options are null, put a label with {@link #TXT_SERVER_TOO_OLD}.
+     * If options are null, put a label with "This server version does not support game options" (localized).
      */
     private void initInterface_Options(Panel bp, GridBagLayout gbl, GridBagConstraints gbc)
     {
@@ -397,6 +415,9 @@ public class NewGameOptionsFrame extends Frame
             for (SOCGameOption opt : opts.values())
                 opt.userChanged = false;  // clear flag from any previously shown NGOF
         }
+
+        if (opts.containsKey("SC"))
+            allSc = SOCScenario.getAllKnownScenarios();
 
         gbc.anchor = GridBagConstraints.WEST;
 
@@ -435,8 +456,14 @@ public class NewGameOptionsFrame extends Frame
                 continue;  // <-- Don't show internal-property options
             }
 
-            if (hideUnderscoreOpts && (op.key.charAt(0) == '_'))
-                continue;  // <-- Don't show options starting with '_'
+            if (op.key.charAt(0) == '_')
+            {
+                if (hideUnderscoreOpts)
+                    continue;  // <-- Don't show options starting with '_'
+
+                if ((allSc != null) && allSc.containsKey(op.key.substring(1)))
+                    continue;  // <-- Don't show options which are scenario names (use SC dropdown to pick at most one)
+            }
 
             if (sameLineOpts.containsKey(op.key))
                 continue;  // <-- Shares a line, Go to next entry --
@@ -468,7 +495,7 @@ public class NewGameOptionsFrame extends Frame
      * and call {@link #initInterface_Opt1(SOCGameOption, Component, boolean, boolean, Panel, GridBagLayout, GridBagConstraints)}.
      *<P>
      * Special handling: Scenario (option {@code "SC"}) gets a checkbox, label, dropdown, and a second line with
-     * an Info button. (Sets {@link #scenChoice}, {@link #scenInfo}).
+     * an Info button. (Sets {@link #scenDropdown}, {@link #scenInfo}).
      *
      * @param op  Option data
      * @param bp  Add to this panel
@@ -480,31 +507,49 @@ public class NewGameOptionsFrame extends Frame
         if (op.key.equals("SC"))
         {
             // special handling: Scenario
-            // TODO server negotiation
-            Map<String, SOCScenario> allSc = SOCScenario.getAllKnownScenarios();
             if ((allSc == null) || allSc.isEmpty())
                 return;
 
             int i = 0, sel = 0;
-            Choice ch = new Choice();
-            ch.add(strings.get("base.none.parens"));  // "(none)" is item 0 in dropdown
-            for (final SOCScenario sc : allSc.values())
+
+            JComboBox jcb = new JComboBox();
+            jcb.addItem(strings.get("base.none.parens"));  // "(none)" is item 0 in dropdown
+
+            Collection<SOCScenario> scens = allSc.values();
+            if (! readOnly)
+            {
+                // Sort by description.
+                // Don't sort if readOnly and thus dropdown not enabled, probably not browsable.
+
+                ArrayList<SOCScenario> sl = new ArrayList<SOCScenario>(scens);
+                Collections.sort(sl, new Comparator<SOCScenario>() {
+                    // This method isn't part of SOCScenario because that class already has
+                    // equals and compareTo methods comparing keys, not descriptions
+
+                    public int compare(SOCScenario a, SOCScenario b)
+                    {
+                        return a.getDesc().compareTo(b.getDesc());
+                    }
+                });
+                scens = sl;
+            }
+
+            for (final SOCScenario sc : scens)
             {
                 ++i;
-                ch.add(sc.key + ": " + sc.desc);  // scenarioKeyFromDisplayText() must be able to extract the key
-                    // TODO some other parallel list, so we don't need to display the key string
+                jcb.addItem(sc);  // sc.toString() == sc.desc
                 if (sc.key.equals(op.getStringValue()))
                     sel = i;
             }
             if (sel != 0)
             {
-                ch.select(sel);
+                jcb.setSelectedIndex(sel);
                 op.setBoolValue(true);
             }
 
-            scenChoice = ch;
-            initInterface_Opt1(op, ch, true, true, bp, gbl, gbc);
-                // adds ch, and a checkbox which will toggle this OTYPE_STR's op.boolValue
+            scenDropdown = jcb;
+            initInterface_Opt1(op, jcb, true, true, bp, gbl, gbc);
+                // adds jcb, and a checkbox which will toggle this OTYPE_STR's op.boolValue
 
             if ((! readOnly) || opts.containsKey("SC"))
             {
@@ -635,7 +680,8 @@ public class NewGameOptionsFrame extends Frame
             bp.add(L);
         }
 
-        final int placeholderIdx = allowPH ? op.desc.indexOf('#') : -1;
+        final String opDesc = op.getDesc();
+        final int placeholderIdx = allowPH ? opDesc.indexOf('#') : -1;
         Panel optp = new Panel();  // with FlowLayout
         try
         {
@@ -649,7 +695,7 @@ public class NewGameOptionsFrame extends Frame
         // Any text to the left of placeholder in op.desc?
         if (placeholderIdx > 0)
         {
-            L = new Label(op.desc.substring(0, placeholderIdx - 1));
+            L = new Label(opDesc.substring(0, placeholderIdx - 1));
             L.setForeground(LABEL_TXT_COLOR);
             optp.add(L);
             if (hasCB && ! readOnly)
@@ -659,7 +705,7 @@ public class NewGameOptionsFrame extends Frame
             }
         }
 
-        // TextField or Choice at placeholder position
+        // TextField or Choice or JComboBox at placeholder position
         if (! (oc instanceof Checkbox))
         {
             controlsOpts.put(oc, op);
@@ -671,9 +717,14 @@ public class NewGameOptionsFrame extends Frame
                 {
                     ((TextField) oc).addTextListener(this);  // for enable/disable
                     ((TextField) oc).addKeyListener(this);   // for ESC/ENTER
-                } else if (oc instanceof Choice)
+                }
+                else if (oc instanceof Choice)
                 {
                     ((Choice) oc).addItemListener(this);  // for related cb, and op.ChangeListener and userChanged
+                }
+                else if (oc instanceof JComboBox)
+                {
+                    ((JComboBox) oc).addActionListener(this);  // for related cb, and op.ChangeListener and userChanged
                 }
             }
         }
@@ -682,9 +733,9 @@ public class NewGameOptionsFrame extends Frame
 
         // Any text to the right of placeholder?  Also creates
         // the text label if there is no placeholder (placeholderIdx == -1).
-        if (placeholderIdx + 1 < op.desc.length())
+        if (placeholderIdx + 1 < opDesc.length())
         {
-            L = new Label(op.desc.substring(placeholderIdx + 1));
+            L = new Label(opDesc.substring(placeholderIdx + 1));
             L.setForeground(LABEL_TXT_COLOR);
             optp.add(L);
             if (hasCB && ! readOnly)
@@ -801,20 +852,45 @@ public class NewGameOptionsFrame extends Frame
             {
                 // Check options, ask client to set up and start a practice game
                 clickCreate(true);
-                return;
             }
             else if (src == cancel)
             {
                 clickCancel();
-                return;
             }
             else if (src == scenInfo)
             {
                 clickScenarioInfo();
-                return;
             }
+            else if (src == scenDropdown)
+            {
+                if (opts == null)
+                    return;
+                SOCGameOption optSC = opts.get("SC");
+                if (optSC == null)
+                    return;
 
-        }  // try
+                Object scObj = scenDropdown.getSelectedItem();
+                boolean wantsSet = (scObj instanceof SOCScenario);  // item 0 is "(none)" string, not a scenario
+                optSC.setBoolValue(wantsSet);
+                if (wantsSet)
+                    optSC.setStringValue(((SOCScenario) scObj).key);
+                else
+                    optSC.setStringValue("");
+
+                if (scenInfo != null)
+                    scenInfo.setEnabled(wantsSet);
+
+                boolean choiceSetCB = false;
+                Checkbox cb = boolOptCheckboxes.get("SC");
+                if ((cb != null) && (wantsSet != cb.getState()))
+                {
+                    cb.setState(wantsSet);
+                    choiceSetCB = true;
+                }
+
+                fireUserChangedOptListeners(optSC, scenDropdown, wantsSet, choiceSetCB);
+            }
+        }
         catch(Throwable thr)
         {
             System.err.println("-- Error caught in AWT event thread: " + thr + " --");
@@ -894,18 +970,18 @@ public class NewGameOptionsFrame extends Frame
 
     /**
      * The "Scenario Info" button was clicked.
-     * Reads the current scenario, if any, from {@link #scenChoice}.
-     * Calls {@link #showScenarioInfoDialog(String, Map, int, GameAwtDisplay, Frame)}.
+     * Reads the current scenario, if any, from {@link #scenDropdown}.
+     * Calls {@link #showScenarioInfoDialog(SOCScenario, Map, int, SOCPlayerClient.GameAwtDisplay, Frame)}.
      * @since 2.0.00
      */
     private void clickScenarioInfo()
     {
-        if (scenChoice == null)
-            return;  // should not happen, scenChoice is created before scenInfo
+        if (scenDropdown == null)
+            return;  // should not happen, scenDropdown is created before scenInfo
 
-        final String scKey = scenarioKeyFromDisplayText(scenChoice.getSelectedItem());
-        if (scKey.length() == 0)
-            return;
+        final Object scObj = scenDropdown.getSelectedItem();
+        if (! (scObj instanceof SOCScenario))
+            return;  // "(none)" item is a String, not a scenario
 
         // find game's vp_winner, if not for new game
         int vpWinner = SOCGame.VP_WINNER_STANDARD;
@@ -916,17 +992,18 @@ public class NewGameOptionsFrame extends Frame
                 vpWinner = vp.getIntValue();
         }
 
-        showScenarioInfoDialog(scKey, null, vpWinner, gameDisplay, this);
+        showScenarioInfoDialog((SOCScenario) scObj, null, vpWinner, gameDisplay, this);
     }
 
-    /** Dismiss the frame, and clear client's {@link SOCPlayerClient#newGameOptsFrame}
-     *  ref to this frame
+    /** Dismiss the frame, and clear client's {@link GameAwtDisplay#newGameOptsFrame}
+     *  reference to null if it's to this frame.
      */
     @Override
     public void dispose()
     {
         if (this == gameDisplay.newGameOptsFrame)
             gameDisplay.newGameOptsFrame = null;
+
         super.dispose();
     }
 
@@ -937,6 +1014,8 @@ public class NewGameOptionsFrame extends Frame
      * @param checkOptionsMinVers Warn the user if the options will require a
      *           minimum client version?  Won't do so if {@link #forPractice} is set,
      *           because this isn't a problem for local practice games.
+     *           The warning is skipped if that minimum is an old version
+     *           &lt;= {@link Version#versionNumberMaximumNoWarn()}.
      * @return true if all were read OK, false if a problem (such as NumberFormatException)
      */
     private boolean readOptsValuesFromControls(final boolean checkOptionsMinVers)
@@ -982,23 +1061,7 @@ public class NewGameOptionsFrame extends Frame
                         ctrl.requestFocusInWindow();
                     }
                 } else {
-                    try   // OTYPE_INT, OTYPE_INTBOOL
-                    {
-                        int iv = Integer.parseInt(txt);
-                        op.setIntValue(iv);
-                        if (iv != op.getIntValue())
-                        {
-                            allOK = false;
-                            msgText.setText
-                                (strings.get("game.options.outofrange", op.minIntValue, op.maxIntValue));
-                            ctrl.requestFocusInWindow();
-                        }
-                    } catch (NumberFormatException ex)
-                    {
-                        allOK = false;
-                        msgText.setText(strings.get("game.options.onlydigits"));
-                        ctrl.requestFocusInWindow();
-                    }
+                    // OTYPE_INT, OTYPE_INTBOOL; defer setting until after all checkboxes have been read
                 }
             }
             else if (ctrl instanceof Choice)
@@ -1011,6 +1074,50 @@ public class NewGameOptionsFrame extends Frame
                     allOK = false;
             }
 
+        }  // for(opts)
+
+        // OTYPE_INT, OTYPE_INTBOOL: now that all checkboxes have been read,
+        //   set int values and see if in range; ignore where bool is not set (checkbox not checked).
+        //   Use 0 if blank (still checks if in range).
+        for (Component ctrl : controlsOpts.keySet())
+        {
+            if (! (ctrl instanceof TextField))
+                continue;
+
+            SOCGameOption op = controlsOpts.get(ctrl);
+            if (op.optType == SOCGameOption.OTYPE_INTBOOL)
+            {
+                if (! op.getBoolValue())
+                    continue;
+            }
+            else if (op.optType != SOCGameOption.OTYPE_INT)
+            {
+                continue;
+            }
+
+            String txt = ((TextField) ctrl).getText().trim();
+            try
+            {
+                int iv;
+                if (txt.length() > 0)
+                    iv = Integer.parseInt(txt);
+                else
+                    iv = 0;
+
+                op.setIntValue(iv);
+                if (iv != op.getIntValue())
+                {
+                    allOK = false;
+                    msgText.setText
+                        (strings.get("game.options.outofrange", op.minIntValue, op.maxIntValue));  // "out of range"
+                    ctrl.requestFocusInWindow();
+                }
+            } catch (NumberFormatException ex)
+            {
+                allOK = false;
+                msgText.setText(strings.get("game.options.onlydigits"));  // "please use only digits here"
+                ctrl.requestFocusInWindow();
+            }
         }  // for(opts)
 
         if (allOK && checkOptionsMinVers && ! forPractice)
@@ -1168,46 +1275,31 @@ public class NewGameOptionsFrame extends Frame
      * <LI>
      * Set {@link SOCGameOption#userChanged}
      * <LI>
-     * Check Choices or Checkboxes to see if their game option has a {@link ChangeListener}.
+     * Check Choices or Checkboxes to see if their game option has a {@link SOCGameOption.ChangeListener ChangeListener}.
      * <LI>
      * Set the checkbox when the popup-menu Choice value is changed for a
      * {@link SOCGameOption#OTYPE_INTBOOL} or {@link SOCGameOption#OTYPE_ENUMBOOL}.
+     * <LI>
+     * Update game option {@code "SC"} and the {@link #scenInfo} button when a scenario is picked
+     * from {@link #scenDropdown}. Other scenario-related updates are handled by this method calling
+     * {@link SOCGameOption.ChangeListener#valueChanged(SOCGameOption, Object, Object, Map)}.
      *</UL>
      * @param e itemevent from a Choice or Checkbox in {@link #controlsOpts}
      */
     public void itemStateChanged(ItemEvent e)
     {
         final Object ctrl = e.getSource();
-        boolean choiceSetCB = false;
         SOCGameOption opt = controlsOpts.get(ctrl);
         if (opt == null)
             return;
+
+        boolean wasCBEvent = false, choiceSetCB = false;
 
         Checkbox cb = boolOptCheckboxes.get(opt.key);
         if ((cb != null) && (cb != ctrl))
         {
             // If the user picked a choice, also set the checkbox
-            boolean wantsSet;
-
-            if (! (opt.key.equals("SC") && (ctrl instanceof Choice)))
-            {
-                wantsSet = true;  // any item sets it
-            } else {
-                // Special case for "SC", an OTYPE_STR with a Choice and Checkbox
-                Choice ch = (Choice) ctrl;
-                wantsSet = (ch.getSelectedIndex() != 0);  // Special case, first item clears it
-                opt.setBoolValue(wantsSet);
-                if (wantsSet)
-                {
-                    final String chText = ch.getSelectedItem();
-                    opt.setStringValue(scenarioKeyFromDisplayText(chText));
-                } else {
-                    opt.setStringValue("");
-                }
-
-                if (scenInfo != null)
-                    scenInfo.setEnabled(wantsSet);
-            }
+            boolean wantsSet = true;  // any item sets it
 
             if (wantsSet != cb.getState())
             {
@@ -1215,7 +1307,38 @@ public class NewGameOptionsFrame extends Frame
                 choiceSetCB = true;
             }
         }
+        else if (ctrl instanceof Checkbox)
+        {
+            wasCBEvent = true;
+            choiceSetCB = (e.getStateChange() == ItemEvent.SELECTED);
+        }
 
+        fireUserChangedOptListeners(opt, ctrl, choiceSetCB, wasCBEvent);
+    }
+
+    /**
+     * A game option's value widget was changed by the user.  If this game option has a
+     * {@link SOCGameOption.ChangeListener}, call it with the appropriate old and new values.
+     * Call to update {@code opt}'s value fields:
+     *<UL>
+     * <LI> If {@code changeBoolValue}, calls {@link SOCGameOption#setBoolValue(boolean) opt.setBoolValue(newBoolValue)}
+     * <LI> If {@code ctrl} is a {@link Choice} or {@link JComboBox}, calls
+     *      {@link SOCGameOption#setIntValue(int) opt.setIntValue}
+     *      ({@link Choice#getSelectedIndex() ctrl.getSelectedIndex()})
+     *</UL>
+     * Calls {@link #fireOptionChangeListener(soc.game.SOCGameOption.ChangeListener, SOCGameOption, Object, Object)}
+     * for the Option's boolean and/or int values.
+     *
+     * @param opt  Game option changed
+     * @param ctrl  The {@link Checkbox} or {@link Choice} or {@link JComboBox} dropdown changed by the user
+     * @param newBoolValue  New value to set for {@link SOCGameOption#getBoolValue() opt.getBoolValue()}
+     * @param changeBoolValue True if the user changed the opt's boolean value, false if
+     *     the opt's int or string value dropdown was changed but boolean wasn't.
+     * @since 2.0.00
+     */
+    final private void fireUserChangedOptListeners
+        (final SOCGameOption opt, final Object ctrl, final boolean newBoolValue, final boolean changeBoolValue)
+    {
         if (! opt.userChanged)
             opt.userChanged = true;
 
@@ -1228,22 +1351,26 @@ public class NewGameOptionsFrame extends Frame
         final boolean fireBooleanListener;
         final Object boolOldValue, boolNewValue;
 
-        if (choiceSetCB || (ctrl instanceof Checkbox))
+        if (newBoolValue || changeBoolValue)
         {
             fireBooleanListener = true;
-            final boolean becameChecked = (e.getStateChange() == ItemEvent.SELECTED);
-            boolNewValue = (becameChecked) ? Boolean.TRUE : Boolean.FALSE;
-            boolOldValue = (becameChecked) ? Boolean.FALSE : Boolean.TRUE;
-            opt.setBoolValue(becameChecked);
+            boolNewValue = (newBoolValue) ? Boolean.TRUE : Boolean.FALSE;
+            boolOldValue = (newBoolValue) ? Boolean.FALSE : Boolean.TRUE;
+            opt.setBoolValue(newBoolValue);
         } else {
             fireBooleanListener = false;
             boolNewValue = null;
             boolOldValue = null;
         }
 
-        if (ctrl instanceof Choice)
+        if ((ctrl instanceof Choice) || (ctrl instanceof JComboBox))
         {
-            int chIdx = ((Choice) ctrl).getSelectedIndex();  // 0 to n-1
+            int chIdx;
+            if (ctrl instanceof Choice)
+                chIdx = ((Choice) ctrl).getSelectedIndex();  // 0 to n-1
+            else
+                chIdx = ((JComboBox) ctrl).getSelectedIndex();
+
             if (chIdx != -1)
             {
                 final int nv = chIdx + opt.minIntValue;
@@ -1260,33 +1387,18 @@ public class NewGameOptionsFrame extends Frame
     }
 
     /**
-     * Get a scenario key, such as "{@link SOCScenario#K_SC_4ISL SC_4ISL}",
-     * from the displayed name+description built by initInterface_OptLine.
-     * @param chText  Scenario name & desc, such as "SC_4ISL: (description here)", or "(none)"
-     * @return  Scenario key name, such as "SC_4ISL", or "" if the delimiter ':' wasn't found
-     * @since 2.0.00
-     */
-    private static final String scenarioKeyFromDisplayText(String chText)
-    {
-        final int i = chText.indexOf(':');
-        if (i <= 0)
-            return "";
-        else
-            return chText.substring(0, i);
-    }
-
-    /**
      * Handle firing a game option's ChangeListener, and refreshing related
      * gameopts' values on-screen if needed.
      * If <tt>oldValue</tt>.equals(<tt>newValue</tt>), nothing happens and
      * the ChangeListener is not called.
      * @param cl  The ChangeListener; must not be null
-     * @param op  The game option
+     * @param opt  The game option
      * @param oldValue  Old value, string or boxed primitive
      * @param newValue  New value, string or boxed primitive
      * @since 1.1.13
      */
-    private void fireOptionChangeListener(SOCGameOption.ChangeListener cl, SOCGameOption opt, final Object oldValue, final Object newValue)
+    private void fireOptionChangeListener
+        (SOCGameOption.ChangeListener cl, SOCGameOption opt, final Object oldValue, final Object newValue)
     {
         if (oldValue.equals(newValue))
             return;  // <--- Early return: Value didn't change ---
@@ -1403,35 +1515,57 @@ public class NewGameOptionsFrame extends Frame
     public void mouseReleased(MouseEvent e) {}
 
     /**
-     * Show a popup window with this scenario's description, special rules, and number of victory points to win.
-     * @param gameSc  A scenario keyname for {@link SOCScenario#getScenario(String)}, or null to do nothing
-     * @param gameOpts  All game options if current game, or null to extract from {@code gameSc}'s {@link SOCScenario#scOpts}
-     * @param vpWinner  Number of victory points to win, or {@link SOCGame#VP_WINNER_STANDARD}.
-     * @param cli     required for {@link AskDialog} constructor
-     * @param parent  required for {@link AskDialog} constructor
+     * Show a popup window with this game's scenario's description, special rules, and number of victory points to win.
+     * Calls {@link EventQueue#invokeLater(Runnable)}.
+     * @param ga  Game to display scenario info for; if game option {@code "SC"} missing or blank, does nothing.
+     * @param cli     Player client interface, for {@link NotifyDialog} call
+     * @param parent  Current game's player interface, or another Frame for our parent window,
+     *                or null to look for {@code cli}'s Frame as parent
      * @since 2.0.00
      */
     public static void showScenarioInfoDialog
-        (final String gameSc, Map<String, SOCGameOption> gameOpts, final int vpWinner,
-         final GameAwtDisplay cli, final Frame parent)
+        (final SOCGame ga, final GameAwtDisplay cli, final Frame parent)
     {
-        if (gameSc == null)
+        final String scKey = ga.getGameOptionStringValue("SC");
+        if (scKey == null)
             return;
 
-        SOCScenario sc = SOCScenario.getScenario(gameSc);
+        SOCScenario sc = SOCScenario.getScenario(scKey);
+        if (sc == null)
+            return;
+
+        showScenarioInfoDialog(sc, ga.getGameOptions(), ga.vp_winner, cli, parent);
+    }
+
+    /**
+     * Show a popup window with this scenario's description, special rules, and number of victory points to win.
+     * Calls {@link EventQueue#invokeLater(Runnable)}.
+     * @param sc  A {@link SOCScenario}, or {@code null} to do nothing
+     * @param gameOpts  All game options if current game, or null to extract from {@code sc}'s {@link SOCScenario#scOpts}
+     * @param vpWinner  Number of victory points to win, or {@link SOCGame#VP_WINNER_STANDARD}.
+     * @param cli     Player client interface, required for {@link AskDialog} constructor
+     * @param parent  Current game's player interface, or another Frame for our parent window,
+     *                or null to look for {@code cli}'s Frame as parent
+     * @since 2.0.00
+     */
+    public static void showScenarioInfoDialog
+        (final SOCScenario sc, Map<String, SOCGameOption> gameOpts, final int vpWinner,
+         final GameAwtDisplay cli, final Frame parent)
+    {
         if (sc == null)
             return;
 
         StringBuilder sb = new StringBuilder();
         sb.append(strings.get("game.options.scenario.label"));  // "Game Scenario:"
         sb.append(' ');
-        sb.append(sc.desc);
+        sb.append(sc.getDesc());
         sb.append('\n');
 
-        if (sc.scLongDesc != null)
+        final String scLongDesc = sc.getLongDesc();
+        if (scLongDesc != null)
         {
             sb.append('\n');
-            sb.append(sc.scLongDesc);
+            sb.append(scLongDesc);
             sb.append('\n');
         }
 
@@ -1455,7 +1589,7 @@ public class NewGameOptionsFrame extends Frame
                 if (! sgo.key.startsWith("_SC_"))
                     continue;
 
-                String optDesc = sgo.desc;
+                String optDesc = sgo.getDesc();
                 if (optDesc.startsWith(optDescScenPrefix))
                     optDesc = optDesc.substring(optDescScenPrefix.length()).trim();
                 sb.append("\n\u2022 ");  // bullet point before option text
@@ -1472,14 +1606,7 @@ public class NewGameOptionsFrame extends Frame
         }
 
         final String scenStr = sb.toString();
-        EventQueue.invokeLater(new Runnable()
-        {
-            public void run()
-            {
-                NotifyDialog.createAndShow(cli, parent, scenStr, null, true);
-            }
-        });
-
+        NotifyDialog.createAndShow(cli, parent, scenStr, null, true);
     }
 
 
@@ -1523,7 +1650,7 @@ public class NewGameOptionsFrame extends Frame
         /** reject entered characters which aren't digits */
         public void keyTyped(KeyEvent e)
         {
-            // TODO this is not working
+            // TODO this is not always rejecting non-digits
 
             switch (e.getKeyCode())
             {
@@ -1538,11 +1665,18 @@ public class NewGameOptionsFrame extends Frame
 
             default:
                 {
-                final char c = e.getKeyChar();
-                if (c == KeyEvent.CHAR_UNDEFINED)  // ctrl characters, arrows, etc
-                    return;
-                if (! Character.isDigit(c))
-                    e.consume();  // ignore non-digits
+                    final char c = e.getKeyChar();
+                    switch (c)
+                    {
+                    case KeyEvent.CHAR_UNDEFINED:  // ctrl characters, arrows, etc
+                    case (char) 8:    // backspace
+                    case (char) 127:  // delete
+                        return;  // don't consume
+
+                    default:
+                        if (! Character.isDigit(c))
+                            e.consume();  // ignore non-digits
+                    }
                 }
             }  // switch(e)
         }

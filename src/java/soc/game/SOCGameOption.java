@@ -1,6 +1,6 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
- * This file Copyright (C) 2009,2011-2014 Jeremy D Monin <jeremy@nand.net>
+ * This file Copyright (C) 2009,2011-2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012 Paul Bilnoski <paul@bilnoski.net>
  *
  * This program is free software; you can redistribute it and/or
@@ -96,6 +96,11 @@ import soc.message.SOCMessage;
  * JSettlers version number to the server's, and asks for any changes to options if
  * their versions differ.
  *<P>
+ * <B>I18N:</B><br>
+ * Game option descriptions are also stored as {@code gameopt.*} in
+ * {@code server/strings/toClient_*.properties} to be sent to clients if needed
+ * during version negotiation.  An option's text can be localized with {@link #setDesc(String)}.
+ *<P>
  * @author Jeremy D. Monin &lt;jeremy@nand.net&gt;
  * @since 1.1.07
  */
@@ -163,10 +168,21 @@ public class SOCGameOption
     /** Option type: boolean  */
     public static final int OTYPE_BOOL = 1;
 
-    /** Option type: integer  */
+    /**
+     * Option type: integer.
+     *<P>
+     * In v2.0.00+ while reading values in the NewGameOptionsFrame dialog, a blank textfield is treated as 0.
+     * If 0 is out of range, the user will have to enter a valid number.
+     */
     public static final int OTYPE_INT = 2;
 
-    /** Option type: integer + boolean.  Both {@link #boolValue} and {@link #intValue} fields are used. */
+    /**
+     * Option type: integer + boolean.  Both {@link #boolValue} and {@link #intValue} fields are used.
+     *<P>
+     * In v2.0.00+ while reading values in the NewGameOptionsFrame dialog, a blank int value textfield
+     * is treated as 0. If 0 is out of range, the user will have to enter a valid number.
+     * If the option's boolean value checkbox isn't set, the int value isn't set or changed.
+     */
     public static final int OTYPE_INTBOOL = 3;
 
     /** Option type: enumeration (1 of several possible choices, described with text strings,
@@ -254,7 +270,7 @@ public class SOCGameOption
 
     /**
      * Scenario key {@code _SC_WOND} for Wonders.
-     * Special unique "wonders" claimed by players and built up to several levels.
+     * Special unique "wonders" claimed by players and built up to several levels. No pirate ship.
      * For more details, special rules, and Special Items, see {@link SOCScenario#K_SC_WOND}.
      * @since 2.0.00
      */
@@ -319,6 +335,7 @@ public class SOCGameOption
      *<LI> {@link #K_SC_CLVI _SC_CLVI}  Cloth trade with neutral {@link SOCVillage villages}: See {@link SOCScenario#K_SC_CLVI}
      *<LI> {@link #K_SC_FTRI _SC_FTRI}  The Forgotten Tribe: See {@link SOCScenario#K_SC_FTRI}
      *<LI> {@link #K_SC_PIRI _SC_PIRI}  Pirate Islands and {@link SOCFortress fortresses}: See {@link SOCScenario#K_SC_PIRI}
+     *<LI> {@link #K_SC_WOND _SC_WOND}  Wonders: See {@link SOCScenario#K_SC_WOND}
      *</UL>
      *
      * <h3>If you want to add a game option:</h3>
@@ -340,7 +357,8 @@ public class SOCGameOption
      *   Its default value on your own server can be changed at runtime.
      *<LI> Decide if all client versions can use your option.  Typically, if the option
      *   requires server changes but not any client changes, all clients can use it.
-     *   (For example, "N7" for "roll no 7s early in the game" is strictly server-side.)
+     *   (For example, "N7" for "roll no 7s early in the game" works with any client
+     *   because dice rolls are done at the server.)
      *<LI> Create the option by calling opt.put here in initAllOptions.
      *   Use the current version for the "last modified" field.
      *<LI> Add the new option's description to the {@code gameopt.*} section of
@@ -581,19 +599,55 @@ public class SOCGameOption
         });
 
         // If SC (scenario) is chosen, also set PLL (large board)
+        // and VP (vp to win), unless already changed by user.
+        // This is for NGOF responsiveness during new-game option setup at the client;
+        // game creation at the server doesn't rely on these updates.
+        // For game creation with scenario options, see adjustOptionsToKnown(doServerPreadjust=true).
+
         sc.addChangeListener(new ChangeListener()
         {
             public void valueChanged
                 (final SOCGameOption optSc, Object oldValue, Object newValue, Map<String, SOCGameOption> currentOpts)
             {
-                SOCGameOption pll = currentOpts.get("PLL");
-                if ((pll == null) || pll.userChanged)
-                    return;
-                final boolean scPicked = optSc.getBoolValue() && (optSc.getStringValue().length() != 0);
-                if (scPicked != pll.getBoolValue())
+                final String newSC = optSc.getStringValue();
+                final boolean isScenPicked = optSc.getBoolValue() && (newSC.length() != 0);
+
+                // check/update #VP if scenario specifies it, otherwise revert to standard
+                SOCGameOption vp = currentOpts.get("VP");
+                if ((vp != null) && ! vp.userChanged)
                 {
-                    pll.setBoolValue(scPicked);
-                    pll.refreshDisplay();
+                    int newVP = SOCGame.VP_WINNER_STANDARD;
+                    if (isScenPicked)
+                    {
+                        final SOCScenario scen = SOCScenario.getScenario(newSC);
+                        if (scen != null)
+                        {
+                            final Map<String, SOCGameOption> scenOpts = SOCGameOption.parseOptionsToMap(scen.scOpts);
+                            final SOCGameOption scOptVP = (scenOpts != null) ? scenOpts.get("VP") : null;
+                            if (scOptVP != null)
+                                newVP = scOptVP.getIntValue();
+
+                            // TODO possibly update other scen opts, not just VP
+                        }
+                    }
+
+                    if (newVP != vp.getIntValue())
+                    {
+                        vp.setIntValue(newVP);
+                        vp.setBoolValue(newVP != SOCGame.VP_WINNER_STANDARD);
+                        vp.refreshDisplay();
+                    }
+                }
+
+                // check/update PLL
+                SOCGameOption pll = currentOpts.get("PLL");
+                if ((pll != null) && ! pll.userChanged)
+                {
+                    if (isScenPicked != pll.getBoolValue())
+                    {
+                        pll.setBoolValue(isScenPicked);
+                        pll.refreshDisplay();
+                    }
                 }
             }
         });
@@ -1003,9 +1057,9 @@ public class SOCGameOption
     }
 
     /**
-     * Copy constructor for i18n localization of {@link SOCVersionedItem#desc desc}.
+     * Copy constructor for i18n localization of {@link SOCVersionedItem#getDesc() getDesc()}.
      * @param opt  Option to copy
-     * @param newDesc  Localized option description, or {@code null} to use {@link SOCVersionedItem#desc desc}
+     * @param newDesc  Localized option description, or {@code null} to use {@link SOCVersionedItem#getDesc() getDesc()}
      * @since 2.0.00
      */
     public SOCGameOption(final SOCGameOption opt, final String newDesc)
@@ -1134,8 +1188,8 @@ public class SOCGameOption
     /**
      * Minimum game version supporting this option, given {@link #minVersion} and the option's current value.
      * The current value of an option can change its minimum version.
-     * For example, a 5- or 6-player game will need a newer client than 4 players,
-     * but option "PL"'s {@link #minVersion} is -1, to allow 2- or 3-player games with any client.
+     * For example, option {@code "PL"}'s minVersion is -1 for 2- to 4-player games with any client version,
+     * but a 5- or 6-player game will need client 1.1.08 or newer.
      * For boolean-valued option types ({@link #OTYPE_BOOL}, {@link #OTYPE_ENUMBOOL} and
      * {@link #OTYPE_INTBOOL}), the minimum
      * value is -1 unless {@link #getBoolValue()} is true (that is, unless the option is set).
@@ -1186,12 +1240,22 @@ public class SOCGameOption
             break;
         }
 
-        // NEW_OPTION:
+        int minVers = minVersion;
+
         // Any option value checking for minVers is done here.
-        // None of the current options change minVers based on their value.
+
+        if (key.equals("SC"))
+        {
+            SOCScenario sc = SOCScenario.getScenario(getStringValue());
+            if ((sc != null) && (sc.minVersion > minVers))
+                minVers = sc.minVersion;
+        }
+
+        // None of the other current options change minVers based on their value.
+
+        // NEW_OPTION:
         // If your option changes the minVers based on its current value,
-        // check the key and current value, and return the appropriate version,
-        // instead of just returning minVersion.
+        // check the key and current value and set the appropriate version like "SC" does.
         //
         // ADDITIONAL BACKWARDS-COMPATIBLE CHECK (opts != null):
         // If opts != null, also check if your option is supported in lower versions
@@ -1202,6 +1266,7 @@ public class SOCGameOption
         // To simplify the server-side code, do not return less than 1107 (the first
         // version with game options) for this backwards-compatible version number
         // unless you are returning -1.
+        //
         // EXAMPLE:
         // For clients below 1.1.13, if game option PLB is set, option
         // PL must be changed to 5 or 6 to force use of the 6-player board.
@@ -1211,15 +1276,7 @@ public class SOCGameOption
         // versions <= 1112 would need PL changed.
         // If PLB is set, and PL <= 4, return 1108 (the first version with a 6-player board).
 
-        // SAMPLE CODE: (without ADDITIONAL CHECK)
-        /*
-        if (key.equals("N7") && (intValue == 42))
-        {
-            return 1108;
-        }
-        */
-        // END OF SAMPLE CODE.
-        // The following non-sample code demonstrates the ADDITIONAL CHECK:
+        // Gameopt "PL" has an ADDITIONAL CHECK, this can be used as sample code for a new option:
 
         if (key.equals("PL"))
         {
@@ -1234,11 +1291,12 @@ public class SOCGameOption
                 if ((plb instanceof SOCGameOption) && ((SOCGameOption) plb).boolValue)
                     return 1113;
             }
+
             if (intValue > 4)
                 return 1108;  // 5 or 6 players
         }
 
-        return minVersion;
+        return minVers;
     }
 
     /**
@@ -1248,7 +1306,8 @@ public class SOCGameOption
      * and send only the permitted values to an older client.
      *
      * @param optKey Option's keyname
-     * @param vers   Version of client, same format as {@link SOCVersion#getVersionNumber()}
+     * @param vers   Version of client, same format as {@link soc.message.SOCVersion#getVersionNumber()}
+     *               and {@link soc.util.Version#versionNumber()}
      * @return  Maximum permitted value for this version, or {@link Integer#MAX_VALUE}
      *          if this option has no restriction.
      *          Enum values range from 1 to n, not from 0 to n-1.
@@ -1277,7 +1336,8 @@ public class SOCGameOption
      * The server, when giving option info to a connecting client, can remove the too-new values.
      *
      * @param optKey Option's keyname
-     * @param vers   Version of client, same format as {@link SOCVersion#getVersionNumber()}
+     * @param vers   Version of client, same format as {@link soc.message.SOCVersion#getVersionNumber()}
+     *               and {@link soc.util.Version#versionNumber()}
      * @return  Maximum permitted value for this version, or {@link Integer#MAX_VALUE}
      *          if this option has no restriction.
      * @since 1.1.08
@@ -1309,6 +1369,8 @@ public class SOCGameOption
      * or update the option's information.
      * @param onew New option, or a changed version of an option we already know.
      *             If onew.optType == {@link #OTYPE_UNKNOWN}, will remove from the known table.
+     *             If this option is already known and the old copy has a {@link SOCGameOption#getChangeListener()},
+     *             that listener is copied to {@code onew}.
      * @return true if it's new, false if we already had that key and it was updated
      * @see #getAllKnownOptions()
      */
@@ -1319,14 +1381,17 @@ public class SOCGameOption
 
 	synchronized (allOptions)
 	{
-	    SOCGameOption oldcopy = allOptions.remove(oKey);
+	    final SOCGameOption oldcopy = allOptions.remove(oKey);
 	    hadIt = (oldcopy != null);
 
 	    if (onew.optType != OTYPE_UNKNOWN)
 	    {
-                final ChangeListener cl = oldcopy.getChangeListener();
-                if (cl != null)
-                    onew.addChangeListener(cl);
+	        if (hadIt)
+	        {
+                    final ChangeListener cl = oldcopy.getChangeListener();
+                    if (cl != null)
+                        onew.addChangeListener(cl);
+	        }
 
 	        allOptions.put(oKey, onew);
 	    }
@@ -1336,13 +1401,16 @@ public class SOCGameOption
     }
 
     /**
-     * Set the current value of a known option, based on the current value of
-     * another object with the same {@link SOCVersionedItem#key key}.
+     * Set the current value(s) of a known option, based on the current value(s) of
+     * another object {@code ocurr} with the same {@link SOCVersionedItem#key key}.
      * If there is no known option with oCurr.{@link SOCVersionedItem#key key}, it is ignored and nothing is set.
-     * @param ocurr Option with the requested current value
-     * @throws  IllegalArgumentException if value is not permitted; note that
-     *            intValues outside of range are silently clipped, and will not
+     * @param ocurr Option with the requested current value.
+     *            {@code ocurr}'s value field contents are copied to the known option's values,
+     *            the {@code ocurr} reference won't be added to the known option set.
+     * @throws  IllegalArgumentException if string value is not permitted; note that
+     *            int values outside of range are silently clipped, and will not
      *            throw this exception.
+     * @see #getOption(String, boolean)
      */
     public static void setKnownOptionCurrentValue(SOCGameOption ocurr)
         throws IllegalArgumentException
@@ -1418,6 +1486,7 @@ public class SOCGameOption
      *               its original object, which is a shared copy in a static namekey->object map.
      * @return information about a known option, or null if none with that key
      * @throws IllegalStateException  if {@code clone} but the object couldn't be cloned; this isn't expected to ever happen
+     * @see #getAllKnownOptions()
      */
     public static SOCGameOption getOption(final String key, final boolean clone)
         throws IllegalStateException
@@ -1481,9 +1550,9 @@ public class SOCGameOption
      *</UL>
      *
      * @throws ClassCastException if {@code omap} contains anything other
-     *         than SOCGameOptions
+     *         than {@code SOCGameOption}s
      * @see #parseOptionNameValue(String, boolean)
-     * @see #packValue(StringBuffer)
+     * @see #packValue(StringBuilder)
      */
     public static String packOptionsToString
         (final Map<String, SOCGameOption> omap, boolean hideEmptyStringOpts)
@@ -1509,7 +1578,8 @@ public class SOCGameOption
      * @return string of name-value pairs, or "-" for an empty or null omap;
      *         see {@link #packOptionsToString(Map, boolean)} javadoc for details.
      * @throws ClassCastException if {@code omap} contains anything other
-     *         than SOCGameOptions
+     *         than {@code SOCGameOption}s
+     * @see #packValue(StringBuilder)
      */
     public static String packOptionsToString
         (final Map<String, SOCGameOption> omap, boolean hideEmptyStringOpts, final int cliVers)
@@ -1524,7 +1594,7 @@ public class SOCGameOption
             && omap.get("PLB").boolValue;
 
     	// Pack all non-unknown options:
-    	StringBuffer sb = new StringBuffer();
+    	StringBuilder sb = new StringBuilder();
     	boolean hadAny = false;
     	for (SOCGameOption op : omap.values())
     	{
@@ -1578,8 +1648,9 @@ public class SOCGameOption
      * See {@link #packOptionsToString(Map, boolean)} for the string's format.
      *
      * @param sb Pack into (append to) this buffer
+     * @see #toString()
      */
-    public void packValue(StringBuffer sb)
+    public void packValue(StringBuilder sb)
     {
         switch (optType)  // OTYPE_* - update this switch, and javadoc of packOptionsToString and of parseOptionNameValue.
         {                 //           The format produced must match that expected in parseOptionNameValue.
@@ -1654,14 +1725,16 @@ public class SOCGameOption
      *
      * @param nvpair Name-value pair string, as created by
      *               {@link #packOptionsToString(Map, boolean)}.
-     *               'T' or 't' or 'Y' or 'y' is always allowed for bool value, regardless of forceNameUpcase.
+     *               <BR>
+     *               'T', 't', 'Y', 'y' are always allowed for bool value, regardless of forceNameUpcase.
+     *               'F', 'f', 'N', 'n' are the valid bool false values.
      * @param forceNameUpcase Call {@link String#toUpperCase()} on keyname within nvpair?
      *               For friendlier parsing of manually entered (command-line) nvpair strings.
      * @return Parsed option, or null if parse error;
      *         if known, the returned object is a clone of the SGO from the set of all known options.
      *         if nvpair's option keyname is not a known option, returned optType will be {@link #OTYPE_UNKNOWN}.
      * @see #parseOptionsToMap(String)
-     * @see #packValue(StringBuffer)
+     * @see #packValue(StringBuilder)
      */
     public static SOCGameOption parseOptionNameValue(final String nvpair, final boolean forceNameUpcase)
     {
@@ -1698,8 +1771,32 @@ public class SOCGameOption
             switch (copyOpt.optType)  // OTYPE_* - update this switch, must match format produced
             {                         //           in packValue / packOptionsToString
             case OTYPE_BOOL:
-                copyOpt.setBoolValue
-                    (optval.equals("t") || optval.equals("T") || optval.equals("y") || optval.equals("Y"));
+                if (optval.length() == 1)
+                {
+                    final boolean bv;
+                    switch (optval.charAt(0))
+                    {
+                    case 't':  // fall through
+                    case 'T':
+                    case 'y':
+                    case 'Y':
+                        bv = true;
+                        break;
+
+                    case 'f':  // fall through
+                    case 'F':
+                    case 'n':
+                    case 'N':
+                        bv = false;
+                        break;
+
+                    default:
+                        return null;  // malformed
+                    }
+                    copyOpt.setBoolValue(bv);
+                } else {
+                    return null;  // malformed
+                }
                 break;
 
             case OTYPE_INT:
@@ -1717,8 +1814,27 @@ public class SOCGameOption
             case OTYPE_ENUMBOOL:
                 try
                 {
-                    final char ch0 = optval.charAt(0);
-                    copyOpt.setBoolValue((ch0 == 't') || (ch0 == 'T') || (ch0 == 'y') || (ch0 == 'Y'));
+                    final boolean bv;
+                    switch (optval.charAt(0))
+                    {
+                    case 't':  // fall through
+                    case 'T':
+                    case 'y':
+                    case 'Y':
+                        bv = true;
+                        break;
+
+                    case 'f':  // fall through
+                    case 'F':
+                    case 'n':
+                    case 'N':
+                        bv = false;
+                        break;
+
+                    default:
+                        return null;  // malformed
+                    }
+                    copyOpt.setBoolValue(bv);
                     copyOpt.setIntValue(Integer.parseInt(optval.substring(1)));
                 } catch (NumberFormatException e)
                 {
@@ -1771,6 +1887,9 @@ public class SOCGameOption
      *              if null, use the "known option" set
      * @return List of the newer (added or changed) {@link SOCGameOption}s, or null
      *     if all are known and unchanged since <tt>vers</tt>.
+     *     <BR>
+     *     <B>Note:</B> May include options with {@link #minVersion} &gt; {@code vers};
+     *     the client may want to know about those.
      * @see #optionsForVersion(int, Map)
      */
     public static List<SOCGameOption> optionsNewerThanVersion
@@ -1818,6 +1937,9 @@ public class SOCGameOption
      *              if null, use the "known option" set
      * @return List of the requested {@link SOCGameOption}s, or null if none match the conditions, at {@code vers};
      *     see {@code optionsNewerThanVersion} and {@code optionsForVersion} for return details.
+     *     <BR>
+     *     <B>Note:</B> If not {@code getAllForVersion}, may include options with
+     *     {@link #minVersion} &gt; {@code vers}; the client may want to know about those.
      * @throws IllegalArgumentException  if {@code getAllForVersion && checkValues}: Cannot combine these modes
      * @since 2.0.00
      */
@@ -1834,7 +1956,7 @@ public class SOCGameOption
             = SOCVersionedItem.implItemsVersionCheck(vers, getAllForVersion, checkValues, opts);
                 // throws IllegalArgumentException if (getAllForVersion && checkValues)
 
-        if (trimEnums)
+        if ((uopt != null) && trimEnums)
         {
             ListIterator<SOCGameOption> li = uopt.listIterator();
             while (li.hasNext())
@@ -1916,6 +2038,11 @@ public class SOCGameOption
      * the game scenario option <tt>"SC"</tt>. If that option is set, call
      * {@link SOCScenario#getScenario(String)}; the scenario name must be known.
      * Then, add that scenario's {@link SOCScenario#scOpts .scOpts} into <tt>newOpts</tt>.
+     * Scenario option values always overwrite those in <tt>newOpts</tt>, except for <tt>"VP"</tt>
+     * where <tt>newOpts</tt> value (if any) is kept.
+     *<P>
+     * Client-side gameopt code also assumes all scenarios use the large board,
+     * and sets game option <tt>"PLL"</tt> when a scenario is chosen by the user.
      *
      * @param newOpts Set of SOCGameOptions to check against knownOpts;
      *            an option's current value will be changed if it's outside of
@@ -1935,7 +2062,7 @@ public class SOCGameOption
      *            </UL>
      * @throws IllegalArgumentException if newOpts contains a non-SOCGameOption
      */
-    public static StringBuffer adjustOptionsToKnown
+    public static StringBuilder adjustOptionsToKnown
         (final Map<String, SOCGameOption> newOpts, Map<String, SOCGameOption> knownOpts,
          final boolean doServerPreadjust)
         throws IllegalArgumentException
@@ -1973,16 +2100,13 @@ public class SOCGameOption
                         // include this scenario's opts,
                         // overwriting any values for those
                         // opts if already in newOpts, except
-                        // keep VP if higher would be overwrote by lower.
+                        // keep VP if specified.
                         opt = newOpts.get("VP");
-                        final int prevVP = ((opt != null) && opt.boolValue)
-                            ? opt.intValue
-                            : SOCGame.VP_WINNER_STANDARD;
+                        if ((opt != null) && ! opt.boolValue)
+                            opt = null;
 
                         final Map<String, SOCGameOption> scOpts = parseOptionsToMap(sc.scOpts);
-
-                        opt = scOpts.get("VP");
-                        if ((opt != null) && ((opt.intValue < prevVP) || ! opt.boolValue))
+                        if (scOpts.containsKey("VP") && (opt != null))
                             scOpts.remove("VP");
 
                         newOpts.putAll(scOpts);
@@ -1990,7 +2114,7 @@ public class SOCGameOption
                 }
 
                 // Client-side gameopt code also assumes all scenarios use
-                // the large board, and set game option "PLL" when a scenario
+                // the large board, and sets game option "PLL" when a scenario
                 // is chosen by the user.
             }
 
@@ -2003,21 +2127,11 @@ public class SOCGameOption
             if ((opt != null) && (opt.getIntValue() > 4))
                 setBoolOption(newOpts, "PLB");
 
-            // If _SC_CLVI is set, VP should be >= 14, and no longest trade route bonus
-            opt = newOpts.get(K_SC_CLVI);
-            if ((opt != null) && opt.getBoolValue())
-            {
-                setBoolOption(newOpts, K_SC_0RVP);
-                opt = newOpts.get("VP");
-                if ((opt == null) || (opt.getIntValue() < 14))
-                    setIntOption(newOpts, "VP", 14, true);
-            }
-
         }  // if(doServerPreadjust)
 
         // OTYPE_* - adj javadoc above (re dropIfUnused) if a string-type or bool-type is added.
 
-        StringBuffer optProblems = new StringBuffer();
+        StringBuilder optProblems = new StringBuilder();
 
         boolean allKnown;
 
@@ -2324,10 +2438,12 @@ public class SOCGameOption
      * Form a string with the key and current value, useful for debugging purposes.
      * @return string such as "PL=4" or "BC=t3", with the same format
      *    as {@link #packKnownOptionsToString(boolean, boolean)}.
+     * @see #packValue(StringBuilder)
+     * @see #optionTypeName(int)
      */
     public String toString()
     {
-        StringBuffer sb = new StringBuffer(key);
+        StringBuilder sb = new StringBuilder(key);
         sb.append('=');
         packValue(sb);
         return sb.toString();
@@ -2336,7 +2452,8 @@ public class SOCGameOption
     /**
      * Compare two options, for display purposes. ({@link Comparable} interface)
      * Two gameoptions are considered equal if they have the same {@link SOCVersionedItem#key key}.
-     * Greater/lesser is determined by {@link SOCVersionedItem#desc desc}.{@link String#compareTo(String) compareTo()}.
+     * Greater/lesser is determined by
+     * {@link SOCVersionedItem#getDesc() desc}.{@link String#compareTo(String) compareTo()}.
      * @param other A SOCGameOption to compare, or another object;  if other isn't a
      *              gameoption, the {@link #hashCode()}s are compared.
      */

@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2007-2009,2011-2013 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2009,2011-2013,2015 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -342,6 +342,7 @@ public class TradeOfferPanel extends Panel
         Button sendBut;
         Button clearBut;
         Button cancelBut;
+        /** True if the current offer's "offered to" includes the client player. */
         boolean offered;
         SOCResourceSet give;
         SOCResourceSet get;
@@ -491,56 +492,50 @@ public class TradeOfferPanel extends Panel
             }
         
             SOCGame ga = hp.getGame();
-            final int maxChars = ((ga.maxPlayers > 4) || ga.hasSeaBoard) ? 30 : 25;
-            //TODO i18n Consider word order of the phase: not always is firstly the phrase, then the names
-            String names1 = strings.get("trade.offered.to") + ' ';  // "Offered to:" + ' '
-            String names2 = null;
+
+            /**
+             * Build the list of player names, retrieve i18n-localized, then wrap at maxChars.
+             */
+            StringBuilder names = new StringBuilder();
 
             int cnt = 0;
-
             for (; cnt < ga.maxPlayers; cnt++)
             {
                 if (offerList[cnt] && ! ga.isSeatVacant(cnt))
                 {
-                    names1 += ga.getPlayer(cnt).getName();
-
+                    names.append(ga.getPlayer(cnt).getName());
                     break;
                 }
             }
 
             cnt++;
 
-            int len = names1.length();
-
             for (; cnt < ga.maxPlayers; cnt++)
             {
                 if (offerList[cnt] && ! ga.isSeatVacant(cnt))
                 {
-                    String name = ga.getPlayer(cnt).getName();
-                    len += name.length();  // May be null if vacant
-                    
-                    if (len < maxChars)
-                    {
-                        names1 += ", ";
-                        names1 += name;
-                    }
-                    else
-                    {
-                        if (names2 == null)
-                        {
-                            names1 += ",";
-                            names2 = new String(name);
-                        }
-                        else
-                        {
-                            names2 += ", ";
-                            names2 += name;
-                        }
-                    }
+                    names.append(", ");
+                    names.append(ga.getPlayer(cnt).getName());
                 }
             }
+
+            final int maxChars = ((ga.maxPlayers > 4) || ga.hasSeaBoard) ? 30 : 25;
+            String names1 = strings.get("trade.offered.to", names);  // "Offered to: p1, p2, p3"
+            String names2 = null;
+            if (names1.length() > maxChars)
+            {
+                // wrap into names2
+                int i = names1.lastIndexOf(", ", maxChars);
+                if (i != -1)
+                {
+                    ++i;  // +1 to keep ','
+                    names2 = names1.substring(i).trim();
+                    names1 = names1.substring(0, i).trim();
+                }
+            }
+
             toWhom1.setText(names1);
-            toWhom2.setText(names2);
+            toWhom2.setText(names2 != null ? names2 : "");
 
             /**
              * Note: this only works if SOCResourceConstants.CLAY == 1
@@ -766,8 +761,36 @@ public class TradeOfferPanel extends Panel
             }            
         }
 
+        /**
+         * Show or hide the Accept button based on client player resources
+         * and whether this offer is offered to client player.
+         *<P>
+         * This should be called when in {@link TradeOfferPanel#OFFER_MODE},
+         * not in {@link TradeOfferPanel#MESSAGE_MODE}.
+         * @since 2.0.00
+         */
+        public void updateOfferButtons()
+        {
+            final boolean haveResources;
+            if (! offered)
+            {
+                haveResources = false;
+            } else {
+                final int cpn = hp.getPlayerInterface().getClientPlayerNumber();
+                if (cpn == -1)
+                    return;
+                SOCPlayer player = hp.getGame().getPlayer(cpn);
+                haveResources = player.getResources().contains(get);
+            }
+
+            acceptBut.setVisible(haveResources);
+        }
+
         /** 
          * show or hide our counter-offer panel, below the trade-offer panel.
+         * Also shows or hides {@link #acceptBut} based on client player resources,
+         * {@link #offered}, and ! {@code visible}; see also {@link #updateOfferButtons()}.
+         *<P>
          * This should be called when in {@link TradeOfferPanel#OFFER_MODE},
          * not in {@link TradeOfferPanel#MESSAGE_MODE}.
          */
@@ -834,6 +857,10 @@ public class TradeOfferPanel extends Panel
      * Update to view the of an offer from another player.
      * If counter-offer was previously shown, show it again.
      * This lets us restore the offer view after message mode.
+     *<P>
+     * To update buttons after {@code setOffer} if the client player's
+     * resources change, call {@link #updateOfferButtons()}.
+     *<P>
      * To clear values to zero, and hide the counter-offer box,
      * call {@link #clearOffer()}.
      *
@@ -845,6 +872,21 @@ public class TradeOfferPanel extends Panel
         offerPanel.update(currentOffer);
         cardLayout.show(this, mode = OFFER_MODE);
         validate();
+    }
+
+    /**
+     * If an offer is currently showing, show or hide Accept button based on the
+     * client player's current resources.  Call this after client player receives,
+     * loses, or trades resources.
+     *
+     * @since 2.0.00
+     */
+    public void updateOfferButtons()
+    {
+        if (! (isVisible() && mode.equals(OFFER_MODE)))
+            return;
+
+        offerPanel.updateOfferButtons();
     }
 
     /**

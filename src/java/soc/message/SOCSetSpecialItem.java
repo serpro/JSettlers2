@@ -1,6 +1,6 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
- * This file Copyright (C) 2014 Jeremy D Monin <jeremy@nand.net>
+ * This file Copyright (C) 2014-2015 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -29,7 +29,7 @@ import soc.game.SOCSpecialItem;  // for javadocs only
  * This message is to pick, set, or clear a {@link SOCSpecialItem} in the game and/or owning player's Special Item list.
  * Within the game data, items are held in per-game and/or per-player Special Item lists.
  * The message conveys which object is affected ({@link #typeKey}, {@link #gameItemIndex}, {@link #playerItemIndex})
- * and the object data fields ({@link #playerNumber}, {@link #coord}, {@link #level}).
+ * and the object data fields ({@link #playerNumber}, {@link #coord}, {@link #level}, {@link #sv}).
  * When a Special Item is held in the game's list and also its owning player's list,
  * the message can update both lists at once.
  *<P>
@@ -48,8 +48,9 @@ import soc.game.SOCSpecialItem;  // for javadocs only
  * So, {@link SOCGame#updateAtBoardLayout()} will have been called at the client and created Special Item objects
  * before any {@code SOCSetSpecialItem} is received.
  *<P>
- * For traffic details see {@link #OP_SET}, {@link #OP_CLEAR}, {@link #OP_PICK} and {@link #OP_DECLINE} javadocs.
- * For game details see the {@link SOCSpecialItem} class javadoc.
+ * For message traffic/protocol details see {@link #OP_SET}, {@link #OP_CLEAR}, {@link #OP_PICK} and
+ * {@link #OP_DECLINE} javadocs; client requests typically use {@link #OP_PICK}.  For game details see
+ * the {@link SOCSpecialItem} class javadoc.
  *
  * @author Jeremy D Monin &lt;jeremy@nand.net&gt;
  * @since 2.0.00
@@ -60,10 +61,22 @@ public class SOCSetSpecialItem extends SOCMessage
     private static final long serialVersionUID = 2000L;
 
     /**
+     * Symbol to represent a null or empty string value, because
+     * empty {@code pa[]} elements can't be parsed over the network
+     * with the current tokenizer.
+     */
+    public static final String EMPTYSTR = "\t";
+
+    // If you add an OP_ constant, also update OPS_STRS[].
+
+    /**
      * If sent from client to server, a request to set an item in the game and/or owning player's Special Item list.
      *<P>
      * If sent from server to client(s) because of something in game or responding to a client request,
      * this item will be set.
+     *<P>
+     * If {@link #gameItemIndex} != -1, sets the special item's {@link SOCSpecialItem#getGameIndex()},
+     * otherwise will not clear or change that field.
      *<P>
      * If setting for both the game and the owning player ({@link #gameItemIndex} != -1 and
      * {@link #playerItemIndex} != -1), the client will check the game for an existing object before checking the player.
@@ -92,7 +105,9 @@ public class SOCSetSpecialItem extends SOCMessage
      * of a Special Item list must be done with {@link #OP_SET} or {@link #OP_CLEAR}, never implied by sending
      * only {@link #OP_PICK}.
      *<P>
-     * The sequence of messages sent from the server for a player's PICK are:
+     * Alternately, the server will respond to the requesting player with {@link #OP_DECLINE}.
+     *<P>
+     * The sequence of messages sent from the server for a player's successful PICK are:
      *<OL>
      * <LI> {@link SOCPlayerElement} message(s) to pay the cost, if any
      * <LI> {@link #OP_SET} or {@link #OP_CLEAR} message(s) resulting from the pick
@@ -100,7 +115,7 @@ public class SOCSetSpecialItem extends SOCMessage
      * <LI> {@link SOCGameState} and related messages, if the state changed or the game is now over
      *</OL>
      *<P>
-     * For convenience, the server's PICK message includes the {@link #coord} and {@link #level} field
+     * For convenience, the server's PICK message includes the {@link #coord}, {@link #level}, and {@link #sv} field
      * values of the special item being picked.  Different scenarios might change picked objects in different ways,
      * so these fields are filled by:
      *<UL>
@@ -159,6 +174,9 @@ public class SOCSetSpecialItem extends SOCMessage
     /** Optional level of construction or strength, or 0. */
     public final int level;
 
+    /** Optional string value from {@link SOCSpecialItem#getStringValue()}, or {@code null}. */
+    public final String sv;
+
     /**
      * Create a SOCSetSpecialItem message with data fields from an item object.
      *
@@ -177,7 +195,26 @@ public class SOCSetSpecialItem extends SOCMessage
         throws IllegalArgumentException, NullPointerException
     {
         this(game.getName(), op, typeKey, gi, pi, ((item.getPlayer() != null) ? item.getPlayer().getPlayerNumber() : -1),
-             item.getCoordinates(), item.getLevel());
+             item.getCoordinates(), item.getLevel(), item.getStringValue());
+    }
+
+    /**
+     * Create a SOCSetSpecialItem message, specifying all field values except
+     * coordinate (-1), level (0), stringValue ({@code null}).
+     * @param ga  Name of the game
+     * @param op  Operation code: see {@link #op} for values
+     * @param typeKey    Special item type key; see the {@link SOCSpecialItem} class javadoc for details
+     * @param gi  Game item index, or -1
+     * @param pi  Player item index (requires pn != -1), or -1
+     * @param pn  Currently owning player number, or -1
+     * @throws IllegalArgumentException
+     * @throws NullPointerException
+     */
+    public SOCSetSpecialItem
+        (final String ga, final int op, final String typeKey, final int gi, final int pi, final int pn)
+        throws IllegalArgumentException, NullPointerException
+    {
+        this(ga, op, typeKey, gi, pi, pn, -1, 0, null);
     }
 
     /**
@@ -188,19 +225,22 @@ public class SOCSetSpecialItem extends SOCMessage
      * @param typeKey    Special item type key; see the {@link SOCSpecialItem} class javadoc for details
      * @param gi  Game item index, or -1
      * @param pi  Player item index (requires pn != -1), or -1
-     * @param pn  Owning player number, or -1
+     * @param pn  Currently owning player number, or -1
      * @param co  Optional coordinate on board, or -1
      * @param lv  Optional built level/strength, or 0
-     * @throws IllegalArgumentException  if ga or typeKey is null, or pi != -1 but pn == -1,
-     *            or gi == -1 and pi == -1
+     * @param sv  Optional stringValue from {@link SOCSpecialItem#getStringValue()}, or {@code null}
+     * @throws IllegalArgumentException  if ga or typeKey is null, or pn != -1 but pi == -1,
+     *            or gi == -1 and pi == -1,
+     *            or sv fails {@link SOCMessage#isSingleLineAndSafe(String)}
      */
     public SOCSetSpecialItem
         (final String ga, final int op, final String typeKey, final int gi, final int pi,
-         final int pn, final int co, final int lv)
+         final int pn, final int co, final int lv, final String sv)
         throws IllegalArgumentException
     {
-        if ((ga == null) || (typeKey == null) || ((pi != -1) && (pn == -1))
-            || ((pi == -1) && (gi == -1)))
+        if ((ga == null) || (typeKey == null) || ((pn != -1) && (pi == -1))
+            || ((pi == -1) && (gi == -1))
+            || ((sv != null) && ! SOCMessage.isSingleLineAndSafe(sv)))
             throw new IllegalArgumentException();
 
         messageType = SETSPECIALITEM;
@@ -212,6 +252,7 @@ public class SOCSetSpecialItem extends SOCMessage
         playerNumber = pn;
         coord = co;
         level = lv;
+        this.sv = sv;
     }
 
     // getGame is required by interface; all message fields are public final, no getters needed
@@ -244,6 +285,7 @@ public class SOCSetSpecialItem extends SOCMessage
             final int pn;    // owning player number, or -1
             final int co;    // optional coordinate, or -1
             final int lv;    // optional level/strength, or 0
+            String sv;  // optional string value, or null
 
             ga = st.nextToken();
             op = Integer.parseInt(st.nextToken());
@@ -253,8 +295,11 @@ public class SOCSetSpecialItem extends SOCMessage
             pn = Integer.parseInt(st.nextToken());
             co = Integer.parseInt(st.nextToken());
             lv = Integer.parseInt(st.nextToken());
+            sv = st.nextToken();
+            if (sv.equals(EMPTYSTR))
+                sv = null;
 
-            return new SOCSetSpecialItem(ga, op, tk, gi, pi, pn, co, lv);
+            return new SOCSetSpecialItem(ga, op, tk, gi, pi, pn, co, lv, sv);
         }
         catch (Exception e)
         {
@@ -271,25 +316,38 @@ public class SOCSetSpecialItem extends SOCMessage
 
     /**
      * SETSPECIALITEM sep game sep2 operation sep2 typeKey sep2 gameItemIndex sep2 playerItemIndex
-     *   sep2 playerNumber sep2 coord sep2 level
+     *   sep2 playerNumber sep2 coord sep2 level sep2 sv
+     *<P>
+     * If {@link #sv} is {@code null}, it's sent as {@link #EMPTYSTR}.
      *
      * @return the command string
      */
     public String toCmd()
     {
+        final String svStr = (sv != null) ? sv : EMPTYSTR;
+
         return SETSPECIALITEM + sep + game + sep2 + op + sep2 + typeKey + sep2 + gameItemIndex + sep2 + playerItemIndex
-            + sep2 + playerNumber + sep2 + coord + sep2 + level;
+            + sep2 + playerNumber + sep2 + coord + sep2 + level + sep2 + svStr;
     }
+
+    /** OP_* constant strings for {@link #toString()} */
+    private final static String[] OPS_STRS = { null, "SET", "CLEAR", "PICK", "DECLINE" };
 
     /**
      * @return a human readable form of the message
      */
     public String toString()
     {
-        return "SOCSetSpecialItem:game=" + game + "|op=" + op + "|typeKey=" + typeKey
+        final String opStr;
+        if ((op > 0) && (op < OPS_STRS.length))
+            opStr = OPS_STRS[op];
+        else
+            opStr = Integer.toString(op);
+
+        return "SOCSetSpecialItem:game=" + game + "|op=" + opStr + "|typeKey=" + typeKey
                 + "|gi=" + gameItemIndex + "|pi=" + playerItemIndex + "|pn=" + playerNumber
                 + "|co=" + ((coord >= 0) ? Integer.toHexString(coord) : Integer.toString(coord))
-                + "|lv=" + level;
+                + "|lv=" + level + "|sv=" + sv;
     }
 
 }

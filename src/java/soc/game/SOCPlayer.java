@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2007-2014 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012-2013 Paul Bilnoski <paul@bilnoski.net>
  *
  * This program is free software; you can redistribute it and/or
@@ -62,7 +62,7 @@ import java.util.Vector;
  * all potential settlement locations are cleared.  Only when they build 2 connected road
  * segments, will another potential settlement location be set.
  *<P>
- * If the board layout changes from game to game, as with {@link SOCLargeBoard} /
+ * If the board layout changes from game to game, as with {@link SOCBoardLarge} /
  * {@link SOCBoard#BOARD_ENCODING_LARGE}, use these methods to update the player's board data
  * after {@link SOCBoard#makeNewBoard(Map)}, in this order:
  *<UL>
@@ -71,11 +71,12 @@ import java.util.Vector;
  * <LI> Optionally, {@link #setRestrictedLegalShips(int[])}
  *</UL>
  *<P>
- * On the {@link SOCLargeBoard large sea board}, our list of the player's roads also
+ * On the {@link SOCBoardLarge large sea board}, our list of the player's roads also
  * contains their ships.  They are otherwise treated separately.
  *
  * @author Robert S Thomas
  */
+@SuppressWarnings("serial")
 public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
 {
     /**
@@ -335,16 +336,18 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * If not {@link SOCGame#hasSeaBoard}, initialized in constructor
      * from {@link SOCBoard#initPlayerLegalAndPotentialSettlements()}.
      *<P>
-     * If {@link SOCGame#hasSeaBoard}, empty until {@link SOCBoard#makeNewBoard(Map)}
+     * If {@link SOCGame#hasSeaBoard}: Empty at server until {@link SOCBoardLarge#makeNewBoard(Map)}
      * and {@link SOCGame#startGame()}, because the board layout and legal settlements vary
-     * from game to game.
+     * from game to game.  Empty at client until
+     * {@link #setPotentialAndLegalSettlements(Collection, boolean, HashSet[])} is called.
+     *
      * @see #potentialSettlements
      * @see SOCBoard#nodesOnLand
      */
     private HashSet<Integer> legalSettlements;
 
     /**
-     * The most recently added node from {@link #addLegalSettlement(int)}, or 0.
+     * The most recently added node from {@link #addLegalSettlement(int, boolean)}, or 0.
      * @since 2.0.00
      */
     private int addedLegalSettlement;
@@ -398,6 +401,7 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * If {@link HashSet#contains(Object) potentialSettlements.contains(new Integer(nodeCoord))},
      * then this is a potential settlement.
      * @see #legalSettlements
+     * @see #setPotentialAndLegalSettlements(Collection, boolean, HashSet[])
      * @see SOCBoard#nodesOnLand
      */
     private HashSet<Integer> potentialSettlements;
@@ -669,7 +673,7 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * {@link SOCBoard#initPlayerLegalAndPotentialSettlements()}.
      *<P>
      * Once the game board is set up, be sure to call
-     * {@link #setPotentialAndLegalSettlements(Collection, boolean, HashSet)}
+     * {@link #setPotentialAndLegalSettlements(Collection, boolean, HashSet[])}
      * to update our data.
      *
      * @param pn the player number
@@ -794,7 +798,7 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * May be called during initial placement.
      * Is called at the end of initial placement, before the first player's first roll.
      * On the 6-player board, is called at the start of
-     * the player's {@link #SPECIAL_BUILDING Special Building Phase}.
+     * the player's {@link SOCGame#SPECIAL_BUILDING Special Building Phase}.
      *<UL>
      *<LI> Mark our new dev cards as old
      *<LI> Set {@link #getNeedToPickGoldHexResources()} to 0
@@ -897,7 +901,6 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * To set or clear this flag, use {@link #setAskedSpecialBuild(boolean)}.
      *
      * @return  if the player has asked to build
-     * @see #getAskSpecialBuildPieces()
      * @see #hasSpecialBuilt()
      * @since 1.1.08
      */
@@ -1137,6 +1140,8 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * Get this player's roads and ships on the board.  Chronological order.
      * Note that if a ship is moved on the board, it may go to the end of this list.
      * @return the list of roads/ships in play
+     * @see #getRoadOrShip(int)
+     * @see #getMostRecentShip()
      */
     public Vector<SOCRoad> getRoads()
     {
@@ -1147,6 +1152,7 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * Get this player's road or ship on an edge.
      * @param  edge  Edge coordinate of the road or ship
      * @return  The player's road or ship in play at this edge, or null
+     * @see #getMostRecentShip()
      * @since 2.0.00
      */
     public SOCRoad getRoadOrShip(final int edge)
@@ -1155,6 +1161,25 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
         {
             if (roadOrShip.getCoordinates() == edge)
                 return roadOrShip;
+        }
+
+        return null;
+    }
+
+    /**
+     * Get this player's most recently placed ship, if any.
+     * @return Most recent ship from {@link #getRoads()}, or {@code null}
+     *    if that list contains no {@link SOCShip}s
+     * @see #getRoads()
+     * @since 2.0.00
+     */
+    public SOCShip getMostRecentShip()
+    {
+        for (int i = roads.size() - 1; i >= 0; --i)
+        {
+            SOCRoad rs = roads.get(i);
+            if (rs instanceof SOCShip)
+                return (SOCShip) rs;
         }
 
         return null;
@@ -1887,6 +1912,7 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
     }
 
     /**
+     * Get the resources currently held in the player's hand.
      * @return the resource set
      */
     public SOCResourceSet getResources()
@@ -1917,7 +1943,7 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
     /**
      * Add to this player's resources and resource-roll totals.
      *<P>
-     * If {@link #hasSeaBoard}, treat {@link SOCResourceConstants#GOLD_LOCAL}
+     * If {@link SOCGame#hasSeaBoard}, treat {@link SOCResourceConstants#GOLD_LOCAL}
      * as the gold-hex resources they must pick, and set
      * {@link #getNeedToPickGoldHexResources()} to that amount.
      * Once the resources from gold from a dice roll are picked, the
@@ -2130,7 +2156,9 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * {@link SOCGame#scenarioEventListener} != null, and sent out to clients.
      * Clients call it from the network message handler.
      * @param svp  Number of SVP
-     * @param desc  Description of player's action that led to the SVP
+     * @param desc  Description of player's action that led to the SVP.
+     *     At the server this is an I18N string key, at the client it's
+     *     localized text sent from the server.
      * @see #getSpecialVPInfo()
      * @since 2.0.00
      */
@@ -2162,7 +2190,7 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * Not all player events are returned here; some can't be represented in a single flag bit.
      *
      * @return Player events which have occurred so far this game
-     * @see #hasScenarioPlayerEvent(int)
+     * @see #hasScenarioPlayerEvent(SOCScenarioPlayerEvent)
      * @since 2.0.00
      */
     public int getScenarioPlayerEvents()
@@ -2250,7 +2278,7 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * this player's starting settlement land areas, encoded to send over the network
      * from server to client. 0 otherwise.
      * @return  Encoded starting land area numbers 1 and 2
-     * @see SOCPlayerElement#STARTING_LANDAREAS
+     * @see soc.message.SOCPlayerElement#STARTING_LANDAREAS
      * @since 2.0.00
      */
     public int getStartingLandAreasEncoded()
@@ -2725,8 +2753,8 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
     /**
      * Check this new settlement for adjacent open ships, to see their its trade route
      * will be closed.  Close it if so.
-     * @param newSettlement  Our new settlement being placed in {@link #putPiece(SOCPlayingPiece, boolean)};
-     *                 should not yet be added to {@link #settlements}
+     * @param newSettle  Our new settlement being placed in {@link #putPiece(SOCPlayingPiece, boolean)};
+     *            should not yet be added to {@link #settlements}
      * @param board  game board
      * @since 2.0.00
      */
@@ -3381,6 +3409,9 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
         case SVP_SETTLED_ANY_NEW_LANDAREA:
             clearScenarioPlayerEvent(p.specialVPEvent);
             break;
+
+        default:
+            break;  // Suppress warning; not all enum values need a handler here
         }
     }
 
@@ -3783,7 +3814,8 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
 
     /**
      * Set which nodes are potential settlements.
-     * Called at client when joining/creating a game.
+     * Called at client when joining/creating a game
+     * when game's Potential Settlements message is received.
      * At server, unless {@link SOCGame#hasSeaBoard},
      * the potentials list is instead copied at start
      * of game from legalSettlements.
@@ -3815,7 +3847,7 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * @param legalLandAreaNodes If non-null and <tt>setLegalsToo</tt>,
      *     all Land Areas' legal (but not currently potential) node coordinates.
      *     Index 0 is ignored; land area numbers start at 1.
-     * @see #addLegalSettlement(int)
+     * @see #addLegalSettlement(int, boolean)
      */
     public void setPotentialAndLegalSettlements
         (Collection<Integer> psList, final boolean setLegalsToo, final HashSet<Integer>[] legalLandAreaNodes)
@@ -3848,14 +3880,27 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * after calling {@link #setPotentialAndLegalSettlements(Collection, boolean, HashSet[])}.
      * This would be a lone location beyond the usual starting/legal LandAreas on the scenario's board.
      * @param node  A node coordinate to add, or 0 to do nothing
+     * @param checkAdjacents  If true, check adjacent nodes before adding.
+     *      If {@code node} is adjacent to a settlement, it won't be added and {@link #getAddedLegalSettlement()}
+     *      won't be updated to {@code node}.
      * @since 2.0.00
      * @see #isLegalSettlement(int)
      * @see #getAddedLegalSettlement()
      */
-    public void addLegalSettlement(final int node)
+    public void addLegalSettlement(final int node, final boolean checkAdjacents)
     {
         if (node == 0)
             return;
+
+        if (checkAdjacents)
+        {
+            final SOCBoard board = game.getBoard();
+            final int[] adjacNodes = board.getAdjacentNodesToNode_arr(node);
+
+            for (int i = 0; i < 3; ++i)
+                if ((adjacNodes[i] != -9) && (null != board.settlementAtNode(adjacNodes[i])))
+                    return;  // <--- Early return: adjacent settlement/city found ---
+        }
 
         legalSettlements.add(Integer.valueOf(node));
         addedLegalSettlement = node;
@@ -3928,12 +3973,12 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
     }
 
     /**
-     * Get the legal-settlement location, if any, added by {@link #addLegalSettlement(int)}.
+     * Get the legal-settlement location, if any, added by {@link #addLegalSettlement(int, boolean)}.
      *<P>
      * That method could be called multiple times, but only the most recently added node
      * is returned by this method.
      *
-     * @return  Legal settlement node added by {@link #addLegalSettlement(int)}, or 0
+     * @return  Legal settlement node added by most recent call to {@link #addLegalSettlement(int, boolean)}, or 0
      * @since 2.0.00
      */
     public int getAddedLegalSettlement()
@@ -3985,7 +4030,7 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * Set this edge to not be a potential road.
      * For use (by robots) when the server denies our request to build at a certain spot.
      *
-     * @param node  coordinates of a an edge on the board. Accepts -1 for edge 0x00.
+     * @param edge  coordinates of an edge on the board. Accepts -1 for edge 0x00.
      * @see #isPotentialRoad(int)
      * @since 1.1.09
      */
@@ -4101,7 +4146,7 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * Set this edge to not be a potential ship.
      * For use (by robots) when the server denies our request to build at a certain spot.
      *
-     * @param node  coordinates of a an edge on the board
+     * @param edge  coordinates of an edge on the board
      * @see #isPotentialRoad(int)
      * @since 2.0.00
      */
@@ -4245,7 +4290,7 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
      * @param pieceType  Piece type, such as {@link SOCPlayingPiece#SETTLEMENT}
      * @since 1.1.12
      * @return true if this piece type is the next to be placed
-     * @throws IllegalStateException if gameState is past initial placement (> {@link #START3B})
+     * @throws IllegalStateException if gameState is past initial placement (> {@link SOCGame#START3B})
      */
     public boolean canBuildInitialPieceType(final int pieceType)
         throws IllegalStateException
@@ -4668,7 +4713,11 @@ public class SOCPlayer implements SOCDevCardConstants, Serializable, Cloneable
         /** Number of special victory points */
         public final int svp;
 
-        /** Description of the player's action that led to the SVP */
+        /**
+         * Description of the player's action that led to the SVP.
+         * At the server this is an I18N string key, at the client it's
+         * localized text sent from the server.
+         */
         public final String desc;
 
         public SpecialVPInfo(final int svp, final String desc)

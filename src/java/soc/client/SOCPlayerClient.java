@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2007-2014 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012-2013 Paul Bilnoski <paul@bilnoski.net>
  *     - UI layer refactoring, GameStatistics, nested class refactoring, parameterize types
  *
@@ -29,6 +29,7 @@ import java.awt.CardLayout;
 import java.awt.Color;
 import java.awt.Container;
 import java.awt.Cursor;
+import java.awt.EventQueue;
 import java.awt.Font;
 import java.awt.Frame;
 import java.awt.GridBagConstraints;
@@ -81,6 +82,7 @@ import soc.game.SOCPlayer;
 import soc.game.SOCPlayingPiece;
 import soc.game.SOCResourceConstants;
 import soc.game.SOCResourceSet;
+import soc.game.SOCScenario;
 import soc.game.SOCSettlement;
 import soc.game.SOCSpecialItem;
 import soc.game.SOCTradeOffer;
@@ -96,6 +98,7 @@ import soc.server.genericServer.StringConnection;
 
 import soc.util.I18n;
 import soc.util.SOCGameList;
+import soc.util.SOCServerFeatures;
 import soc.util.SOCStringManager;
 import soc.util.Version;
 
@@ -108,7 +111,7 @@ import soc.util.Version;
  * argument in the html source. If you run this as a stand-alone, you have to
  * specify the port.
  *<P>
- * At startup or init, will try to connect to server via {@link #connect()}.
+ * At startup or init, will try to connect to server via {@link SOCPlayerClient.ClientNetwork#connect(String, int)}.
  * See that method for more details.
  *<P>
  * There are three possible servers to which a client can be connected:
@@ -179,24 +182,36 @@ public class SOCPlayerClient
 
     /**
      *  Server version number for remote server, sent soon after connect, 0 if no server, or -1 if version unknown.
-     *  A local server's version is always {@link Version#versionNumber()}.
+     *  A local practice server's version is always {@link Version#versionNumber()}, not {@code sVersion},
+     *  so always check {@link SOCGame#isPractice} before checking this field.
      */
     protected int sVersion;
 
     /**
+     * Server's active optional features, sent soon after connect, or null if unknown.
+     * Not used with a local practice server, so always check {@link SOCGame#isPractice} before checking this field.
+     * @see #tcpServGameOpts
+     * @since 1.1.19
+     */
+    protected SOCServerFeatures sFeatures;
+
+    /**
      * Track the game options available at the remote server, at the practice server.
-     * Initialized by {@link #gameWithOptionsBeginSetup(boolean)}
+     * Initialized by {@link SOCPlayerClient.GameAwtDisplay#gameWithOptionsBeginSetup(boolean, boolean)}
      * and/or {@link MessageTreater#handleVERSION(boolean, SOCVersion)}.
      * These fields are never null, even if the respective server is not connected or not running.
      *<P>
      * For a summary of the flags and variables involved with game options,
      * and the client/server interaction about their values, see
-     * {@link GameOptionServerSet}'s javadoc.
+     * {@link ServerGametypeInfo}'s javadoc.
+     *<P>
+     * Scenario strings are localized by {@link #localizeGameScenarios(List, boolean, boolean, boolean)}.
      *
+     * @see #sFeatures
      * @since 1.1.07
      */
-    protected GameOptionServerSet tcpServGameOpts = new GameOptionServerSet(),
-        practiceServGameOpts = new GameOptionServerSet();
+    protected ServerGametypeInfo tcpServGameOpts = new ServerGametypeInfo(),
+        practiceServGameOpts = new ServerGametypeInfo();
 
     /**
      * For practice games, default game name ("Practice").
@@ -206,19 +221,30 @@ public class SOCPlayerClient
 
     /**
      * the nickname; null until validated and set by
-     * {@link #getValidNickname(boolean) getValidNickname(true)}
+     * {@link SOCPlayerClient.GameAwtDisplay#getValidNickname(boolean) getValidNickname(true)}
      */
     protected String nickname = null;
 
     /**
-     * the password
+     * the password for {@link #nickname}. If the server's authenticated this password,
+     * the {@link #gotPassword} flag is set.
      */
     protected String password = null;
 
     /**
-     * true if we've stored the password
+     * true if we've stored the password and the server's replied that it's correct
+     * @see #isNGOFWaitingForAuthStatus
      */
     protected boolean gotPassword;
+
+    /**
+     * true if user clicked "new game" and, before showing {@link NewGameOptionsFrame}, we've
+     * sent the nickname (username) and password to the server and are waiting for a response.
+     *<P>
+     * Used only with TCP servers, not with {@link SOCPlayerClient.ClientNetwork#practiceServer practiceServer}.
+     * @since 1.1.19
+     */
+    protected boolean isNGOFWaitingForAuthStatus;
 
     /**
      * face ID chosen most recently (for use in new games)
@@ -237,10 +263,10 @@ public class SOCPlayerClient
      * we're in) which we can join (version is not higher than our version).
      *<P>
      * Key is the game name, without the UNJOINABLE prefix.
-     * This field is null until {@link #handleGAMES(SOCGames, boolean) handleGAMES},
-     *   {@link #handleGAMESWITHOPTIONS(SOCGamesWithOptions, boolean) handleGAMESWITHOPTIONS},
-     *   {@link #handleNEWGAME(SOCNewGame, boolean) handleNEWGAME}
-     *   or {@link #handleNEWGAMEWITHOPTIONS(SOCNewGameWithOptions, boolean) handleNEWGAMEWITHOPTIONS}
+     * This field is null until {@link SOCPlayerClient.MessageTreater#handleGAMES(SOCGames, boolean) handleGAMES},
+     *   {@link SOCPlayerClient.MessageTreater#handleGAMESWITHOPTIONS(SOCGamesWithOptions, boolean) handleGAMESWITHOPTIONS},
+     *   {@link SOCPlayerClient.MessageTreater#handleNEWGAME(SOCNewGame, boolean) handleNEWGAME}
+     *   or {@link SOCPlayerClient.MessageTreater#handleNEWGAMEWITHOPTIONS(SOCNewGameWithOptions, boolean) handleNEWGAMEWITHOPTIONS}
      *   is called.
      * @since 1.1.07
      */
@@ -269,12 +295,22 @@ public class SOCPlayerClient
      * Number of practice games started; used for naming practice games
      */
     protected int numPracticeGames = 0;
-    
+
+
     /**
      * A facade for the SOCPlayerClient to use to invoke actions in the GUI
+     * @since 2.0.00
      */
     public interface GameDisplay
     {
+        /**
+         * Init the visual elements.  Done before connecting to server,
+         * so we don't know its version or active {@link SOCServerFeatures}.
+         * So, most of the Main Panel elements are initialized here but not
+         * laid out or made visible until a later call to
+         * {@link #showVersion(int, String, String, SOCServerFeatures)}
+         * when the version and features are known.
+         */
         void initVisualElements();
 
         /**
@@ -298,15 +334,44 @@ public class SOCPlayerClient
          */
         void clickPracticeButton();
         void practiceGameStarting();
-        
+
         void setMessage(String string);
 
+        /**
+         * Show an error dialog which has one button.
+         * @param errMessage  Error message to show
+         * @param buttonText  Button text, or null for "OK"
+         */
         void showErrorDialog(String errMessage, String buttonText);
+
+        /**
+         * After network trouble, show a panel with the error message
+         * instead of the main user/password/games/channels panel.
+         *<P>
+         * If we have the startup panel (started as JAR client app, not applet) with buttons to connect
+         * to a server or practice, show that instead of the simpler practice-only message panel.
+         *
+         * @param err  Error message to show
+         * @param canPractice  In current state of client, can we start a practice game?
+         * @since 1.1.16
+         */
         void showErrorPanel(String err, boolean canPractice);
 
         void enableOptions();
 
-        void showVersion(int versionNumber, String versionString, String buildString);
+        /**
+         * After connecting, display the remote server's version on main panel,
+         * and update display based on its active {@link SOCServerFeatures}.
+         * Not called for practice server.
+         * If we're running a server, display its listening port # instead.
+         * @param versionNumber  Version number, like 1119, from server's {@link soc.util.Version#versionNumber()}
+         * @param versionString  Version string, like "1.1.19", from server's {@link soc.util.Version#version()}
+         * @param buildString  Build number, from server's {@link soc.util.Version#buildnum()}
+         * @param feats  Active optional server features; never null. If server is older than v1.1.19, use the
+         *            {@link SOCServerFeatures#SOCServerFeatures(boolean) SOCServerFeatures(true)} constructor.
+         */
+        void showVersion
+            (final int versionNumber, final String versionString, final String buildString, final SOCServerFeatures feats);
 
         /**
          * Show server welcome banner or status text.
@@ -315,6 +380,12 @@ public class SOCPlayerClient
          * @param debugWarn   True if server has Debug Mode active
          */
         void showStatus(String statusText, boolean debugWarn);
+
+        /** If the password field is currently visible, focus the cursor there for the user to type something. */
+        public void focusPassword();
+
+        /** Set the contents of the password field. */
+        public void setPassword(final String pw);
 
         void channelJoined(String channelName);
         void channelJoined(String channelName, String nickname);
@@ -331,15 +402,87 @@ public class SOCPlayerClient
 
         PlayerClientListener gameJoined(SOCGame game);
 
+        /**
+         * Want to start a new game, on a server which supports options.
+         * Do we know the valid options already?  If so, bring up the options window.
+         * If not, ask the server for them. If a {@link NewGameOptionsFrame} is already
+         * showing, give it focus instead of creating a new one.
+         *<P>
+         * For a summary of the flags and variables involved with game options,
+         * and the client/server interaction about their values, see
+         * {@link ServerGametypeInfo}.
+         *
+         * @param forPracticeServer  Ask {@link ClientNetwork#practiceServer}, instead of TCP server?
+         * @param didAuth  If true, the server has authenticated our username and password;
+         *     set those input fields read-only.
+         */
+        void gameWithOptionsBeginSetup(final boolean forPracticeServer, final boolean didAuth);
+
         void optionsRequested();
-        void optionsReceived(GameOptionServerSet opts, boolean isPractice);
-        void optionsReceived(GameOptionServerSet opts, boolean isPractice, boolean isDash, boolean hasAllNow);
-        
+
+        /**
+         * Server has sent its game option default values for new games.
+         * Called when {@link ServerGametypeInfo#newGameWaitingForOpts} flag was set and
+         * has just been cleared.  Client should show dialog to create a new game which
+         * will have game options.
+         *
+         * @param opts  Client's game option info, tracking the TCP or local practice server
+         * @param isPractice  True if received from {@link ClientNetwork#practiceServer}, instead of TCP server
+         */
+        void optionsReceived(ServerGametypeInfo opts, boolean isPractice);
+
+        /**
+         * Server has sent info about a single game option.  If {@code hasAllNow},
+         * client should check {@link ServerGametypeInfo#newGameWaitingForOpts} and
+         * {@link ServerGametypeInfo#gameInfoWaitingForOpts}, and if either of these
+         * were waiting, show a game info/options dialog for a new game or existing game.
+         *
+         * @param opts  Client's game option info, tracking the TCP or local practice server
+         * @param isPractice  True if received from {@link ClientNetwork#practiceServer}, instead of TCP server
+         * @param isDash  True if the game option was {@code "-"}, indicating the end of the list.
+         *     If so, no further options will be sent and any running timeout task related to the
+         *     game options can be cancelled.
+         * @param hasAllNow  If true, all game option info has now been received by the client
+         */
+        void optionsReceived(ServerGametypeInfo opts, boolean isPractice, boolean isDash, boolean hasAllNow);
+
+        /**
+         * Add a new game to the initial window's list of games.
+         * If client can't join, makes sure the game is marked as unjoinable
+         * in the {@link SOCPlayerClient#serverGames} list.
+         *
+         * @param cannotJoin Can we not join this game?
+         * @param gameName the game name to add to the list;
+         *            must not have the prefix {@link SOCGames#MARKER_THIS_GAME_UNJOINABLE}.
+         * @param gameOptsStr String of packed {@link SOCGameOption game options}, or null
+         * @param addToSrvList Should this game be added to the list of remote-server games?
+         *            Practice games should not be added.
+         */
         void addToGameList(final boolean cannotJoin, String gameName, String gameOptsStr, final boolean addToSrvList);
+
+        /**
+         * Update this game's stats in the game list display.
+         *
+         * @param gameName Name of game to update
+         * @param scores Each player position's score
+         * @param robots Is this position a robot?
+         *
+         * @see soc.message.SOCGameStats
+         */
         void updateGameStats(String gameName, int[] scores, boolean[] robots);
+
+        /**
+         * Delete a game from the list.
+         * If it's on the list, also remove from {@link #serverGames}.
+         *
+         * @param gameName  the game to remove
+         * @param isPractice   Game is practice, not at tcp server?
+         * @return true if deleted, false if not found in list
+         */
         boolean deleteFromGameList(String gameName, final boolean isPractice);
-        
-    }
+
+    }  // public interface GameDisplay
+
 
     /**
      * Create a SOCPlayerClient connecting to localhost port {@link ClientNetwork#SOC_PORT_DEFAULT}.
@@ -409,12 +552,13 @@ public class SOCPlayerClient
 
     /**
      * @return the nickname of this user
-     * @see #getValidNickname(boolean)
+     * @see SOCPlayerClient.GameAwtDisplay#getValidNickname(boolean)
      */
     public String getNickname()
     {
         return nickname;
     }
+
 
     /**
      * A {@link GameDisplay} implementation for AWT.
@@ -445,18 +589,40 @@ public class SOCPlayerClient
         public final String NET_UNAVAIL_CAN_PRACTICE_MSG;
 
         /**
-         * Hint message if they try to join game without entering a nickname.
+         * Hint message if they try to join a game or channel without entering a nickname.
          *
          * @see #NEED_NICKNAME_BEFORE_JOIN_2
+         * @see #NEED_NICKNAME_BEFORE_JOIN_G
          */
         public final String NEED_NICKNAME_BEFORE_JOIN;
 
         /**
-         * Stronger hint message if they still try to join game without entering a nickname.
+         * Stronger hint message if they still try to join a game or channel without entering a nickname.
          *
          * @see #NEED_NICKNAME_BEFORE_JOIN
+         * @see #NEED_NICKNAME_BEFORE_JOIN_G2
          */
         public final String NEED_NICKNAME_BEFORE_JOIN_2;
+
+        /**
+         * Hint message if they try to join a game without entering a nickname,
+         * on a server which doesn't support chat channels.
+         *
+         * @see #NEED_NICKNAME_BEFORE_JOIN_G2
+         * @see #NEED_NICKNAME_BEFORE_JOIN
+         * @since 1.1.19
+         */
+        public final String NEED_NICKNAME_BEFORE_JOIN_G;
+
+        /**
+         * Stronger hint message if they still try to join a game without entering a nickname,
+         * on a server which doesn't support chat channels.
+         *
+         * @see #NEED_NICKNAME_BEFORE_JOIN_G
+         * @see #NEED_NICKNAME_BEFORE_JOIN_2
+         * @since 1.1.19
+         */
+        public final String NEED_NICKNAME_BEFORE_JOIN_G2;
 
         /**
          * Status text to indicate client cannot join a game.
@@ -484,7 +650,7 @@ public class SOCPlayerClient
          * Task for timeout when asking remote server for {@link SOCGameOption game options defaults}.
          * Set up when sending {@link SOCGameOptionGetDefaults GAMEOPTIONGETDEFAULTS}.
          * In case of slow connection or server bug.
-         * @see #gameWithOptionsBeginSetup(boolean)
+         * @see #gameWithOptionsBeginSetup(boolean, boolean)
          * @since 1.1.07
          */
         protected GameOptionDefaultsTimeoutTask gameOptsDefsTask = null;
@@ -520,12 +686,55 @@ public class SOCPlayerClient
          */
         public NewGameOptionsFrame newGameOptsFrame = null;
 
+        // MainPanel GUI elements:
+
+        /**
+         * MainPanel GUI, initialized in {@link #initVisualElements()}
+         * and {@link #initMainPanelLayout(boolean, SOCServerFeatures)}.
+         *<P>
+         * {@code mainPane}, {@link #mainGBL}, and {@link #mainGBC} are fields not locals so that
+         * the layout can be changed after initialization if needed.  Most of the Main Panel
+         * elements are initialized in {@link #initVisualElements()} but not laid out or made visible
+         * until a later call to {@link #initMainPanelLayout(boolean, SOCServerFeatures)} (from
+         * ({@link #showVersion(int, String, String, SOCServerFeatures) showVersion(....)})
+         * when the version and features are known.
+         * @since 1.1.19
+         */
+        private Panel mainPane;
+
+        /** Layout for {@link #mainPane} */
+        private GridBagLayout mainGBL;
+
+        /** Constraints for {@link #mainGBL} */
+        private GridBagConstraints mainGBC;
+
+        /**
+         * Flags for tracking {@link #mainPane} layout status, in case
+         * {@link #initMainPanelLayout(boolean, SOCServerFeatures)} is
+         * called again after losing connection and then connecting to
+         * another server or starting a hosted tcp server.
+         * @since 1.1.19
+         */
+        private boolean mainPaneLayoutIsDone, mainPaneLayoutIsDone_hasChannels;
+
         protected TextField nick;
         protected TextField pass;
         protected TextField status;
+
+        /**
+         * Chat channel name to create or join with {@link #jc} button.
+         * Hidden in v1.1.19+ if server is missing {@link SOCServerFeatures#FEAT_CHANNELS}.
+         */
         protected TextField channel;
+
         // protected TextField game;  // removed 1.1.07 - NewGameOptionsFrame instead
+
+        /**
+         * List of chat channels that can be joined with {@link #jc} button.
+         * Hidden in v1.1.19+ if server is missing {@link SOCServerFeatures#FEAT_CHANNELS}.
+         */
         protected java.awt.List chlist;
+
         protected java.awt.List gmlist;
 
         /**
@@ -534,7 +743,13 @@ public class SOCPlayerClient
          */
         protected Button ng;  // new game
 
-        protected Button jc;  // join channel
+        /**
+         * "Join Channel" button, for channel currently highlighted in {@link #chlist},
+         * or create new channel named in {@link #channel}. Hidden in v1.1.19+ if server
+         * is missing {@link SOCServerFeatures#FEAT_CHANNELS}.
+         */
+        protected Button jc;
+
         protected Button jg;  // join game
         protected Button pg;  // practice game (against practiceServer, not localTCPServer)
 
@@ -598,8 +813,12 @@ public class SOCPlayerClient
                 // "The server is unavailable. You can still play practice games."
             NEED_NICKNAME_BEFORE_JOIN = client.strings.get("pcli.main.join.neednickname");
                 // "First enter a nickname, then join a game or channel."
+            NEED_NICKNAME_BEFORE_JOIN_G = client.strings.get("pcli.main.join.neednickname.g");
+                // "First enter a nickname, then join a game."
             NEED_NICKNAME_BEFORE_JOIN_2 = client.strings.get("pcli.main.join.neednickname.2");
                 // "You must enter a nickname before you can join a game or channel."
+            NEED_NICKNAME_BEFORE_JOIN_G2 = client.strings.get("pcli.main.join.neednickname.g2");
+                // "You must enter a nickname before you can join a game."
             STATUS_CANNOT_JOIN_THIS_GAME = client.strings.get("pcli.main.join.cannot");
                 // "Cannot join, this client is incompatible with features of this game."
         }
@@ -624,14 +843,17 @@ public class SOCPlayerClient
             messageLabel.setText(message);
         }
 
-        public void showErrorDialog(String errMessage, String buttonText)
+        /**
+         * {@inheritDoc}
+         *<P>
+         * Uses {@link NotifyDialog#createAndShow(GameAwtDisplay, Frame, String, String, boolean)}
+         * which calls {@link EventQueue#invokeLater(Runnable)} to ensure it displays from the proper thread.
+         */
+        public void showErrorDialog(final String errMessage, final String buttonText)
         {
             NotifyDialog.createAndShow(this, null, errMessage, buttonText, true);
         }
 
-        /**
-         * init the visual elements
-         */
         public void initVisualElements()
         {
             final SOCStringManager strings = client.strings;
@@ -656,6 +878,8 @@ public class SOCPlayerClient
             jg = new Button(strings.get("pcli.main.join.game"));     // "Join Game"
             pg = new Button(strings.get("pcli.main.practice"));      // "Practice" -- "practice game" text is too wide
             gi = new Button(strings.get("pcli.main.game.info"));     // "Game Info" -- show game options
+            versionOrlocalTCPPortLabel = new Label();
+            localTCPServerLabel = new Label();
 
             // Username not entered yet: can't click buttons
             ng.setEnabled(false);
@@ -734,18 +958,126 @@ public class SOCPlayerClient
             pg.addActionListener(actionListener);
             gi.addActionListener(actionListener);
 
-            GridBagLayout gbl = new GridBagLayout();
-            GridBagConstraints c = new GridBagConstraints();
-            Panel mainPane = new Panel(gbl);
+            initMainPanelLayout(true, null);  // status line only, until later call to showVersion
+
+            Panel messagePane = new Panel(new BorderLayout());
+
+            // secondary message at top of message pane, used with pgm button.
+            messageLabel_top = new Label("", Label.CENTER);
+            messageLabel_top.setVisible(false);
+            messagePane.add(messageLabel_top, BorderLayout.NORTH);
+
+            // message label that takes up the whole pane
+            messageLabel = new Label("", Label.CENTER);
+            messageLabel.setForeground(new Color(252, 251, 243)); // off-white
+            messagePane.add(messageLabel, BorderLayout.CENTER);
+
+            // bottom of message pane: practice-game button
+            pgm = new Button(strings.get("pcli.message.practicebutton"));  // "Practice Game (against robots)"
+            pgm.setVisible(false);
+            messagePane.add(pgm, BorderLayout.SOUTH);
+            pgm.addActionListener(actionListener);
+
+            // all together now...
+            cardLayout = new CardLayout();
+            setLayout(cardLayout);
+
+            if (hasConnectOrPractice)
+            {
+                connectOrPracticePane = new SOCConnectOrPracticePanel(this);
+                add (connectOrPracticePane, CONNECT_OR_PRACTICE_PANEL);  // shown first
+            }
+            add(messagePane, MESSAGE_PANEL); // shown first unless cpPane
+            add(mainPane, MAIN_PANEL);
+
+            messageLabel.setText(strings.get("pcli.message.waiting"));  // "Waiting to connect."
+            validate();
+        }
+
+        /**
+         * Lay out the Main Panel: status text, name, password, game/channel names and lists, buttons.
+         * This method is called twice: First during client init to lay out the status display only,
+         * and then again once the server is connected and its features and version are known.
+         *<P>
+         * Because {@link #mainPane} is part of a larger layout, this method does not call {@code validate()}.
+         * Be sure to call {@link Container#validate() validate()} afterwards once the entire layout is ready.
+         *<P>
+         * This was part of {@link #initVisualElements()} before v1.1.19.
+         * @param isStatusRow  If true, this is an initial call and only the status row should be laid out.
+         *     If false, assumes status was already done and adds the rest of the rows.
+         * @param feats  Active optional server features, for second call with {@code isStatusRow == false}.
+         *     Null when {@code isStatusRow == true}.  See {@link #showVersion(int, String, String, SOCServerFeatures)}
+         *     javadoc for expected contents when an older server does not report features.
+         * @since 1.1.19
+         * @throws IllegalArgumentException if {@code feats} is null but {@code isStatusRow} is false
+         */
+        private void initMainPanelLayout(final boolean isStatusRow, final SOCServerFeatures feats)
+            throws IllegalArgumentException
+        {
+            if ((feats == null) && ! isStatusRow)
+                throw new IllegalArgumentException("feats");
+
+            final SOCStringManager strings = client.strings;
+
+            if (mainGBL == null)
+                mainGBL = new GridBagLayout();
+            if (mainGBC == null)
+                mainGBC = new GridBagConstraints();
+            if (mainPane == null)
+                mainPane = new Panel(mainGBL);
+            else if (mainPane.getLayout() == null)
+                mainPane.setLayout(mainGBL);
+
+            final GridBagLayout gbl = mainGBL;
+            final GridBagConstraints c = mainGBC;
 
             c.fill = GridBagConstraints.BOTH;
             c.gridwidth = GridBagConstraints.REMAINDER;
-            gbl.setConstraints(status, c);
-            mainPane.add(status);
+
+            if (isStatusRow)
+            {
+                gbl.setConstraints(status, c);
+                mainPane.add(status);
+
+                return;  // <---- Early return: Call later to lay out the rest ----
+            }
+
+            // Reminder: Everything here and below is the delayed second call.
+            // So, any fields must be initialized in initVisualElements(), not here.
+
+            final boolean hasChannels = feats.isActive(SOCServerFeatures.FEAT_CHANNELS);
+
+            if (mainPaneLayoutIsDone)
+            {
+                // called again after layout was done; probably connected to a different server
+
+                if (hasChannels != mainPaneLayoutIsDone_hasChannels)
+                {
+                    // hasChannels changed: redo both layout calls
+                    mainPane.removeAll();
+                    mainGBL = null;
+                    mainGBC = null;
+                    mainPane.setLayout(null);
+                    mainPaneLayoutIsDone = false;
+
+                    initMainPanelLayout(true, null);
+                    initMainPanelLayout(false, feats);
+                }
+
+                return;  // <---- Early return: Layout done already ----
+            }
+
+            // If ! hasChannels, these aren't part of a layout: hide them in case other code checks isVisible()
+            channel.setVisible(hasChannels);
+            chlist.setVisible(hasChannels);
+            jc.setVisible(hasChannels);
 
             Label l;
 
-            // Row 1
+            // Layout is 6 columns wide (item, item, middle spacer, item, spacer, item).
+            // If ! hasChannels, channel-related items won't be laid out; adjust spacing to compensate.
+
+            // Row 1 (spacer)
 
             l = new Label();
             c.gridwidth = GridBagConstraints.REMAINDER;
@@ -794,23 +1126,26 @@ public class SOCPlayerClient
 
             // Row 3 (New Channel label & textfield, Practice btn, New Game btn)
 
-            l = new Label(strings.get("pcli.main.label.newchannel"));  // "New Channel:"
-            c.gridwidth = 1;
-            gbl.setConstraints(l, c);
-            mainPane.add(l);
+            if (hasChannels)
+            {
+                l = new Label(strings.get("pcli.main.label.newchannel"));  // "New Channel:"
+                c.gridwidth = 1;
+                gbl.setConstraints(l, c);
+                mainPane.add(l);
 
-            c.gridwidth = 1;
-            gbl.setConstraints(channel, c);
-            mainPane.add(channel);
+                c.gridwidth = 1;
+                gbl.setConstraints(channel, c);
+                mainPane.add(channel);
+            }
 
             l = new Label();
-            c.gridwidth = 1;
+            c.gridwidth = (hasChannels) ? 1 : 3;
             gbl.setConstraints(l, c);
             mainPane.add(l);
 
             c.gridwidth = 1;  // this position was "New Game:" label before 1.1.07
             gbl.setConstraints(pg, c);
-            mainPane.add(pg);
+            mainPane.add(pg);  // "Practice"
 
             l = new Label();
             c.gridwidth = 1;
@@ -819,7 +1154,7 @@ public class SOCPlayerClient
 
             c.gridwidth = 1;
             gbl.setConstraints(ng, c);
-            mainPane.add(ng);
+            mainPane.add(ng);  // "New Game..."
 
             l = new Label();
             c.gridwidth = GridBagConstraints.REMAINDER;
@@ -828,7 +1163,6 @@ public class SOCPlayerClient
 
             // Row 4 (spacer)
 
-            localTCPServerLabel = new Label();
             c.gridwidth = 2;
             gbl.setConstraints(localTCPServerLabel, c);
             mainPane.add(localTCPServerLabel);
@@ -840,14 +1174,16 @@ public class SOCPlayerClient
 
             // Row 5 (version/port# label, join channel btn, show-options btn, join game btn)
 
-            versionOrlocalTCPPortLabel = new Label();
-            c.gridwidth = 1;
+            c.gridwidth = (hasChannels) ? 1 : 2;
             gbl.setConstraints(versionOrlocalTCPPortLabel, c);
             mainPane.add(versionOrlocalTCPPortLabel);
 
-            c.gridwidth = 1;
-            gbl.setConstraints(jc, c);
-            mainPane.add(jc);
+            if (hasChannels)
+            {
+                c.gridwidth = 1;
+                gbl.setConstraints(jc, c);
+                mainPane.add(jc);  // "Join Channel"
+            }
 
             l = new Label();
             c.gridwidth = 1;
@@ -856,7 +1192,7 @@ public class SOCPlayerClient
 
             c.gridwidth = 1;
             gbl.setConstraints(gi, c);
-            mainPane.add(gi);
+            mainPane.add(gi);  // "Game Info"
 
             l = new Label();
             c.gridwidth = 1;
@@ -865,7 +1201,7 @@ public class SOCPlayerClient
 
             c.gridwidth = 1;
             gbl.setConstraints(jg, c);
-            mainPane.add(jg);
+            mainPane.add(jg);  // "Join Game"
 
             l = new Label();
             c.gridwidth = GridBagConstraints.REMAINDER;
@@ -874,15 +1210,18 @@ public class SOCPlayerClient
 
             // Row 6
 
-            l = new Label(strings.get("pcli.main.label.channels"));  // "Channels"
-            c.gridwidth = 2;
-            gbl.setConstraints(l, c);
-            mainPane.add(l);
+            if (hasChannels)
+            {
+                l = new Label(strings.get("pcli.main.label.channels"));  // "Channels"
+                c.gridwidth = 2;
+                gbl.setConstraints(l, c);
+                mainPane.add(l);
 
-            l = new Label();
-            c.gridwidth = 1;
-            gbl.setConstraints(l, c);
-            mainPane.add(l);
+                l = new Label();
+                c.gridwidth = 1;
+                gbl.setConstraints(l, c);
+                mainPane.add(l);
+            }
 
             l = new Label(strings.get("pcli.main.label.games"));  // "Games"
             c.gridwidth = GridBagConstraints.REMAINDER;
@@ -891,52 +1230,25 @@ public class SOCPlayerClient
 
             // Row 7
 
-            c.gridwidth = 2;
-            c.gridheight = GridBagConstraints.REMAINDER;
-            gbl.setConstraints(chlist, c);
-            mainPane.add(chlist);
+            if (hasChannels)
+            {
+                c.gridwidth = 2;
+                c.gridheight = GridBagConstraints.REMAINDER;
+                gbl.setConstraints(chlist, c);
+                mainPane.add(chlist);
 
-            l = new Label();
-            c.gridwidth = 1;
-            gbl.setConstraints(l, c);
-            mainPane.add(l);
+                l = new Label();
+                c.gridwidth = 1;
+                gbl.setConstraints(l, c);
+                mainPane.add(l);
+            }
 
             c.gridwidth = GridBagConstraints.REMAINDER;
             gbl.setConstraints(gmlist, c);
             mainPane.add(gmlist);
 
-            Panel messagePane = new Panel(new BorderLayout());
-
-            // secondary message at top of message pane, used with pgm button.
-            messageLabel_top = new Label("", Label.CENTER);
-            messageLabel_top.setVisible(false);
-            messagePane.add(messageLabel_top, BorderLayout.NORTH);
-
-            // message label that takes up the whole pane
-            messageLabel = new Label("", Label.CENTER);
-            messageLabel.setForeground(new Color(252, 251, 243)); // off-white
-            messagePane.add(messageLabel, BorderLayout.CENTER);
-
-            // bottom of message pane: practice-game button
-            pgm = new Button(strings.get("pcli.message.practicebutton"));  // "Practice Game (against robots)"
-            pgm.setVisible(false);
-            messagePane.add(pgm, BorderLayout.SOUTH);
-            pgm.addActionListener(actionListener);
-
-            // all together now...
-            cardLayout = new CardLayout();
-            setLayout(cardLayout);
-
-            if (hasConnectOrPractice)
-            {
-                connectOrPracticePane = new SOCConnectOrPracticePanel(this);
-                add (connectOrPracticePane, CONNECT_OR_PRACTICE_PANEL);  // shown first
-            }
-            add(messagePane, MESSAGE_PANEL); // shown first unless cpPane
-            add(mainPane, MAIN_PANEL);
-
-            messageLabel.setText(strings.get("pcli.message.waiting"));  // "Waiting to connect."
-            validate();
+            mainPaneLayoutIsDone_hasChannels = hasChannels;
+            mainPaneLayoutIsDone = true;
         }
 
         /**
@@ -958,10 +1270,6 @@ public class SOCPlayerClient
             return client.getNickname();
         }
 
-        /**
-         * Act as if the "practice game" button has been clicked.
-         * Assumes the dialog panels are all initialized.
-         */
         public void clickPracticeButton()
         {
             guardedActionPerform(pgm);
@@ -1068,7 +1376,8 @@ public class SOCPlayerClient
                 }
         
                 status.setText(client.strings.get("pcli.message.talkingtoserv"));  // "Talking to server..."
-                client.net.putNet(SOCJoin.toCmd(client.nickname, client.password, client.net.getHost(), ch));
+                client.net.putNet(SOCJoin.toCmd
+                    (client.nickname, (client.gotPassword ? "" : client.password), client.net.getHost(), ch));
             }
             else
             {
@@ -1124,9 +1433,9 @@ public class SOCPlayerClient
             }
             else if (target == ng)  // "New Game" button
             {
-                if (null != getValidNickname(false))  // name check, but don't set nick field yet
+                if (null != getValidNickname(false))  // that method does a name check, but doesn't set nick field yet
                 {
-                    gameWithOptionsBeginSetup(false);  // Also may set status, WAIT_CURSOR
+                    gameWithOptionsBeginSetup(false, false);  // Also may set status, WAIT_CURSOR
                 } else {
                     nick.requestFocusInWindow();  // Not a valid player nickname
                 }
@@ -1166,9 +1475,13 @@ public class SOCPlayerClient
             {
                 // This game is either from the tcp server, or practice server,
                 // both servers' games are in the same GUI list.
+
                 Map<String,SOCGameOption> opts = null;
+
                 if ((client.net.practiceServer != null) && (-1 != client.net.practiceServer.getGameState(gm)))
+                {
                     opts = client.net.practiceServer.getGameOptions(gm);  // won't ever need to parse from string on practice server
+                }
                 else if (client.serverGames != null)
                 {
                     opts = client.serverGames.getGameOptions(gm);
@@ -1176,10 +1489,14 @@ public class SOCPlayerClient
                     {
                         // If necessary, parse game options from string before displaying.
                         // (Parsed options are cached, they won't be re-parsed)
+                        // If parsed options include a scenario, and we don't have its
+                        // localized strings, ask the server for that but don't wait for
+                        // a reply before showing the NewGameOptionsFrame.
         
                         if (client.tcpServGameOpts.allOptionsReceived)
                         {
                             opts = client.serverGames.parseGameOptions(gm);
+                            client.checkGameoptsForUnknownScenario(opts);
                         } else {
                             // not yet received; remember game name.
                             // when all are received, will show it,
@@ -1244,7 +1561,7 @@ public class SOCPlayerClient
                 if (pi.getGame().getGameState() == SOCGame.OVER)
                 {
                     // No point joining, just get options to start a new one.
-                    gameWithOptionsBeginSetup(true);
+                    gameWithOptionsBeginSetup(true, false);
                 }
                 else
                 {
@@ -1280,7 +1597,7 @@ public class SOCPlayerClient
                         status.setText
                             (client.strings.get("pcli.message.startingpractice"));  // "Starting practice game setup..."
 
-                    gameWithOptionsBeginSetup(true);  // Also may set WAIT_CURSOR
+                    gameWithOptionsBeginSetup(true, false);  // Also may set WAIT_CURSOR
                 }
                 else
                 {
@@ -1294,7 +1611,8 @@ public class SOCPlayerClient
 
                     status.setText(client.strings.get("pcli.message.talkingtoserv"));  // "Talking to server..."
                     setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
-                    client.net.putNet(SOCJoinGame.toCmd(client.nickname, client.password, client.net.getHost(), gm));
+                    client.net.putNet(SOCJoinGame.toCmd
+                        (client.nickname, (client.gotPassword ? "" : client.password), client.net.getHost(), gm));
                 }
             }
             else
@@ -1309,6 +1627,7 @@ public class SOCPlayerClient
          * Validate and return the nickname textfield, or null if blank or not ready.
          * If successful, also set {@link #nickname} field.
          * @param precheckOnly If true, only validate the name, don't set {@link #nickname}.
+         * @see #readValidNicknameAndPassword()
          * @since 1.1.07
          */
         protected String getValidNickname(boolean precheckOnly)
@@ -1317,12 +1636,19 @@ public class SOCPlayerClient
         
             if (n.length() == 0)
             {
-                if (status.getText().equals(NEED_NICKNAME_BEFORE_JOIN))
+                final String stat = status.getText();
+                if (stat.equals(NEED_NICKNAME_BEFORE_JOIN) || stat.equals(NEED_NICKNAME_BEFORE_JOIN_G))
                     // Send stronger hint message
-                    status.setText(NEED_NICKNAME_BEFORE_JOIN_2);
+                    status.setText
+                        ((client.sFeatures.isActive(SOCServerFeatures.FEAT_CHANNELS))
+                         ? NEED_NICKNAME_BEFORE_JOIN_2
+                         : NEED_NICKNAME_BEFORE_JOIN_G2 );
                 else
                     // Send first hint message (or re-send first if they've seen _2)
-                    status.setText(NEED_NICKNAME_BEFORE_JOIN);
+                    status.setText
+                        ((client.sFeatures.isActive(SOCServerFeatures.FEAT_CHANNELS))
+                         ? NEED_NICKNAME_BEFORE_JOIN
+                         : NEED_NICKNAME_BEFORE_JOIN_G );
                 return null;
             }
         
@@ -1375,21 +1701,12 @@ public class SOCPlayerClient
         }
 
         /**
-         * Want to start a new game, on a server which supports options.
-         * Do we know the valid options already?  If so, bring up the options window.
-         * If not, ask the server for them.
-         * Updates tcpServGameOpts, practiceServGameOpts, newGameOptsFrame.
-         * If a {@link NewGameOptionsFrame} is already showing, give it focus
-         * instead of creating a new one.
+         * {@inheritDoc}
          *<P>
-         * For a summary of the flags and variables involved with game options,
-         * and the client/server interaction about their values, see
-         * {@link GameOptionServerSet}.
-         *
-         * @param forPracticeServer  Ask {@link #practiceServer}, instead of remote tcp server?
+         * Updates tcpServGameOpts, practiceServGameOpts, newGameOptsFrame.
          * @since 1.1.07
          */
-        protected void gameWithOptionsBeginSetup(final boolean forPracticeServer)
+        public void gameWithOptionsBeginSetup(final boolean forPracticeServer, final boolean didAuth)
         {
             if (newGameOptsFrame != null)
             {
@@ -1397,11 +1714,42 @@ public class SOCPlayerClient
                 return;
             }
 
-            GameOptionServerSet opts;
+            // Have we authenticated our password?  If not, do so now before creating newGameOptsFrame.
+            // Even if the server doesn't support accounts or passwords, this will name our connection
+            // and reserve our nickname.
+            if ((! (forPracticeServer || client.gotPassword))
+                && (client.sVersion >= SOCAuthRequest.VERSION_FOR_AUTHREQUEST))
+            {
+                if (! readValidNicknameAndPassword())
+                    return;
+
+                // handleSTATUSMESSAGE(SV_OK) will check the isNGOFWaitingForAuthStatus flag and
+                // call gameWithOptionsBeginSetup again if set.  At that point client.gotPassword
+                // will be true, so we'll bypass this section.
+
+                client.isNGOFWaitingForAuthStatus = true;
+                status.setText(client.strings.get("pcli.message.talkingtoserv"));  // "Talking to server..."
+                setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));  // NGOF create calls setCursor(DEFAULT_CURSOR)
+                client.net.putNet(SOCAuthRequest.toCmd
+                    (SOCAuthRequest.ROLE_GAME_PLAYER, client.nickname, client.password,
+                     SOCAuthRequest.SCHEME_CLIENT_PLAINTEXT, client.net.getHost()));
+
+                return;
+            }
+
+            if (didAuth)
+            {
+                nick.setEditable(false);
+                pass.setText("");
+                pass.setEditable(false);
+            }
+
+            ServerGametypeInfo opts;
 
             // What server are we going against? Do we need to ask it for options?
             {
-                boolean setKnown = false;
+                boolean fullSetIsKnown = false;
+
                 if (forPracticeServer)
                 {
                     opts = client.practiceServGameOpts;
@@ -1414,20 +1762,29 @@ public class SOCPlayerClient
                         // The practice server will be started when the player clicks
                         // "Create Game" in the NewGameOptionsFrame, causing the new
                         // game to be requested from askStartGameWithOptions.
-                        setKnown = true;
+                        fullSetIsKnown = true;
                         opts.optionSet = SOCServer.localizeKnownOptions(client.cliLocale, true);
+                    }
+
+                    if (! opts.allScenStringsReceived)
+                    {
+                        // Game scenario localized text. As with game options, the practice client and
+                        // practice server aren't started yet, so we can't request localization from there.
+                        client.localizeGameScenarios
+                            (SOCServer.localizeGameScenarios(client.cliLocale, null, false, null),
+                             false, true, true);
                     }
                 } else {
                     opts = client.tcpServGameOpts;
                     if ((! opts.allOptionsReceived) && (client.sVersion < SOCNewGameWithOptions.VERSION_FOR_NEWGAMEWITHOPTIONS))
                     {
                         // Server doesn't support them.  Don't ask it.
-                        setKnown = true;
+                        fullSetIsKnown = true;
                         opts.optionSet = null;
                     }
                 }
 
-                if (setKnown)
+                if (fullSetIsKnown)
                 {
                     opts.allOptionsReceived = true;
                     opts.defaultsReceived = true;
@@ -1470,7 +1827,7 @@ public class SOCPlayerClient
                 return;  // <--- Early return: Show options to user ----
             }
 
-            // OK, we need the options.
+            // OK, we need to sync scenario and option info.
             // Ask the server by sending GAMEOPTIONGETDEFAULTS.
             // (This will never happen for practice games, see above.)
 
@@ -1480,6 +1837,42 @@ public class SOCPlayerClient
 
             status.setText(client.strings.get("pcli.message.talkingtoserv"));  // "Talking to server..."
             setCursor(Cursor.getPredefinedCursor(Cursor.WAIT_CURSOR));
+
+            final int cliVers = Version.versionNumber();
+            if ((! forPracticeServer) && (! opts.allScenInfoReceived)
+                && (client.sVersion >= SOCScenario.VERSION_FOR_SCENARIOS))
+            {
+                // Before game option defaults, ask for any updated or localized scenario info;
+                // that will all be received before game option defaults, so client will have it
+                // before NewGameOptionsFrame appears with the scenarios dropdown Choice widget.
+
+                List<String> changes = null;
+
+                if (cliVers > client.sVersion)
+                {
+                    // Client newer than server: Ask specifically about any scenarios server might not know about.
+
+                    final List<SOCScenario> changeScens =
+                        SOCVersionedItem.itemsNewerThanVersion
+                            (client.sVersion, false, SOCScenario.getAllKnownScenarios());
+
+                    if (changeScens != null)
+                    {
+                        changes = new ArrayList<String>();
+                        for (SOCScenario sc : changeScens)
+                            changes.add(sc.key);
+                    }
+                }
+
+                // Else, server is newer than our client or same version.
+                //   Server is newer: Ask for any scenario changes since our version.
+                //   Same version: Ask for i18n localized scenarios strings if available.
+                //   In both cases that's requested by sending an empty 'changes' list and MARKER_ANY_CHANGED.
+
+                if ((cliVers != client.sVersion) || client.wantsI18nStrings(false))
+                    client.gameManager.put(new SOCScenarioInfo(changes, true).toCmd(), false);
+            }
+
             opts.newGameWaitingForOpts = true;
             opts.askedDefaultsAlready = true;
             opts.askedDefaultsTime = System.currentTimeMillis();
@@ -1499,7 +1892,7 @@ public class SOCPlayerClient
          * If it's practice, will call {@link #startPracticeGame(String, Map, boolean)}.
          * Otherwise, ask tcp server, and also set WAIT_CURSOR and status line ("Talking to server...").
          *<P>
-         * Assumes {@link #getValidNickname(boolean) getValidNickname(true)}, {@link #getPassword()}, {@link #host},
+         * Assumes {@link #getValidNickname(boolean) getValidNickname(true)}, {@link #getPassword()}, {@link ClientNetwork#host},
          * and {@link #gotPassword} are already called and valid.
          *
          * @param gmName Game name; for practice, null is allowed
@@ -1515,10 +1908,13 @@ public class SOCPlayerClient
             {
                 client.startPracticeGame(gmName, opts, true);  // Also sets WAIT_CURSOR
             } else {
+                final String pw = (client.gotPassword ? "" : client.password);  // after successful auth, don't need to send
                 String askMsg =
                     (client.sVersion >= SOCNewGameWithOptions.VERSION_FOR_NEWGAMEWITHOPTIONS)
-                    ? SOCNewGameWithOptionsRequest.toCmd(client.nickname, client.password, client.net.getHost(), gmName, opts)
-                    : SOCJoinGame.toCmd(client.nickname, client.password, client.net.getHost(), gmName);
+                    ? SOCNewGameWithOptionsRequest.toCmd
+                        (client.nickname, pw, client.net.getHost(), gmName, opts)
+                    : SOCJoinGame.toCmd
+                        (client.nickname, pw, client.net.getHost(), gmName);
                 System.err.println("L1314 askStartGameWithOptions at " + System.currentTimeMillis());
                 System.err.println("      Got all opts,defaults? " + client.tcpServGameOpts.allOptionsReceived
                     + " " + client.tcpServGameOpts.defaultsReceived);
@@ -1534,7 +1930,7 @@ public class SOCPlayerClient
         /**
          * Look for active games that we're playing
          *
-         * @param fromPracticeServer  Enumerate games from {@link #practiceServer},
+         * @param fromPracticeServer  Enumerate games from {@link ClientNetwork#practiceServer},
          *     instead of {@link #playerInterfaces}?
          * @return Any found game of ours which is active (state not OVER), or null if none.
          * @see SOCPlayerClient.ClientNetwork#anyHostedActiveGames()
@@ -1586,8 +1982,9 @@ public class SOCPlayerClient
          * After network trouble, show the error panel ({@link #MESSAGE_PANEL})
          * instead of the main user/password/games/channels panel ({@link #MAIN_PANEL}).
          *<P>
-         * If {@link #hasConnectOrPractice we have the startup panel} with buttons to connect
-         * to a server or practice, we'll show that instead of the simpler practice-only message panel.
+         * If {@link #hasConnectOrPractice we have the startup panel} (started as JAR client
+         * app, not applet) with buttons to connect to a server or practice, we'll show that
+         * instead of the simpler practice-only message panel.
          *
          * @param err  Error message to show
          * @param canPractice  In current state of client, can we start a practice game?
@@ -1646,10 +2043,16 @@ public class SOCPlayerClient
                 gi.setEnabled(true);
         }
 
-        public void showVersion(int vers, String versionString, String buildString)
+        /**
+         * {@inheritDoc}
+         *<P>
+         * {@code showVersion} calls
+         * {@link #initMainPanelLayout(boolean, SOCServerFeatures) initMainPanelLayout(false, feats)}
+         * to complete layout of the Main Panel with the server's version and active features.
+         */
+        public void showVersion
+            (final int vers, final String versionString, final String buildString, final SOCServerFeatures feats)
         {
-            // Display the version on main panel, unless we're running a server.
-            // (If so, want to display its listening port# instead)
             if (null == client.net.localTCPServer)
             {
                 versionOrlocalTCPPortLabel.setForeground(new Color(252, 251, 243)); // off-white
@@ -1661,8 +2064,11 @@ public class SOCPlayerClient
                      versionOrlocalTCPPortLabel);
             }
 
+            initMainPanelLayout(false, feats);  // complete the layout as appropriate for server
+            validate();
+
             if ((client.net.practiceServer == null) && (vers < SOCNewGameWithOptions.VERSION_FOR_NEWGAMEWITHOPTIONS)
-                    && (gi != null))
+                && (gi != null))
                 gi.setEnabled(false);  // server too old for options, so don't use that button
         }
 
@@ -1679,6 +2085,16 @@ public class SOCPlayerClient
 
             // If was trying to join a game, reset cursor from WAIT_CURSOR.
             setCursor(Cursor.getPredefinedCursor(Cursor.DEFAULT_CURSOR));
+        }
+
+        public void focusPassword()
+        {
+            pass.requestFocusInWindow();
+        }
+
+        public void setPassword(final String pw)
+        {
+            pass.setText(pw);
         }
 
         public void channelJoined(String channelName)
@@ -1821,8 +2237,11 @@ public class SOCPlayerClient
                 cardLayout.show(GameAwtDisplay.this, MAIN_PANEL);
                 validate();
 
-                status.setText(client.strings.get("pcli.main.join.neednickname"));
-                    // "First enter a nickname, then join a game or channel."
+                status.setText
+                    ((client.sFeatures.isActive(SOCServerFeatures.FEAT_CHANNELS))
+                     ? NEED_NICKNAME_BEFORE_JOIN    // "First enter a nickname, then join a game or channel."
+                     : NEED_NICKNAME_BEFORE_JOIN_G  // "First enter a nickname, then join a game."
+                     );
             }
 
             for (String ch : channelNames)
@@ -1918,14 +2337,14 @@ public class SOCPlayerClient
             gameOptionsSetTimeoutTask();
         }
         
-        public void optionsReceived(GameOptionServerSet opts, boolean isPractice)
+        public void optionsReceived(ServerGametypeInfo opts, boolean isPractice)
         {
             gameOptionsCancelTimeoutTask();
             newGameOptsFrame = NewGameOptionsFrame.createAndShow
                 (GameAwtDisplay.this, (String) null, opts.optionSet, isPractice, false);
         }
         
-        public void optionsReceived(GameOptionServerSet opts, boolean isPractice, boolean isDash, boolean hasAllNow)
+        public void optionsReceived(ServerGametypeInfo opts, boolean isPractice, boolean isDash, boolean hasAllNow)
         {
             final boolean newGameWaiting;
             final String gameInfoWaiting;
@@ -1947,6 +2366,8 @@ public class SOCPlayerClient
                         opts.gameInfoWaitingForOpts = null;
                     }
                     final Map<String,SOCGameOption> gameOpts = client.serverGames.parseGameOptions(gameInfoWaiting);
+                    if (! isPractice)
+                        client.checkGameoptsForUnknownScenario(gameOpts);
                     newGameOptsFrame = NewGameOptionsFrame.createAndShow
                         (GameAwtDisplay.this, gameInfoWaiting, gameOpts, isPractice, true);
                 }
@@ -1961,19 +2382,9 @@ public class SOCPlayerClient
                 }
             }
         }
-        
-        /**
-         * add a new game to the initial window's list of games.
-         * If client can't join, also add to {@link #serverGames} as an unjoinable game.
-         *
-         * @param cannotJoin Can we not join this game?
-         * @param gameName the game name to add to the list;
-         *                 must not have the prefix {@link SOCGames#MARKER_THIS_GAME_UNJOINABLE}.
-         * @param gameOptsStr String of packed {@link SOCGameOption game options}, or null
-         * @param addToSrvList Should this game be added to the list of remote-server games?
-         *                 Practice games should not be added.
-         */
-        public void addToGameList(final boolean cannotJoin, String gameName, String gameOptsStr, final boolean addToSrvList)
+
+        public void addToGameList
+            (final boolean cannotJoin, String gameName, String gameOptsStr, final boolean addToSrvList)
         {
             if (addToSrvList)
             {
@@ -2005,15 +2416,6 @@ public class SOCPlayerClient
             }
         }
 
-        /**
-         * Update this game's stats in the game list display.
-         *
-         * @param gameName Name of game to update
-         * @param scores Each player position's score
-         * @param robots Is this position a robot?
-         * 
-         * @see soc.message.SOCGameStats
-         */
         public void updateGameStats(String gameName, int[] scores, boolean[] robots)
         {
             //D.ebugPrintln("UPDATE GAME STATS FOR "+gameName);
@@ -2072,14 +2474,6 @@ public class SOCPlayerClient
             }
         }
 
-        /**
-         * delete a game from the list.
-         * If it's on the list, also remove from {@link #serverGames}.
-         *
-         * @param gameName  the game to remove
-         * @param isPractice   Game is practice, not at tcp server?
-         * @return true if deleted, false if not found in list
-         */
         public boolean deleteFromGameList(String gameName, final boolean isPractice)
         {
             //String testString = gameName + STATSPREFEX;
@@ -2145,6 +2539,7 @@ public class SOCPlayerClient
          *
          * @param cmd  Local client command string, such as \ignore or \&shy;unignore
          * @return true if a command was handled
+         * @see SOCPlayerInterface#doLocalCommand(String)
          */
         public boolean doLocalCommand(String ch, String cmd)
         {
@@ -2211,7 +2606,7 @@ public class SOCPlayerClient
          * If needed, a {@link ClientNetwork#localTCPServer local server} and robots are started, and client connects to it.
          * If parent is a Frame, set titlebar to show "server" and port#.
          * Show port number in {@link #versionOrlocalTCPPortLabel}.
-         * If the {@link #localTCPServer} is already created, does nothing.
+         * If the {@link ClientNetwork#localTCPServer} is already created, does nothing.
          * If {@link ClientNetwork#connected connected} already, does nothing.
          *
          * @param tport Port number to host on; must be greater than zero.
@@ -2343,6 +2738,8 @@ public class SOCPlayerClient
 
     /**
      * Nested class for processing incoming messages (treating).
+     *<P>
+     * Before v2.0.00, most of these fields and methods were part of the main {@link SOCPlayerClient} class.
      * @author paulbilnoski
      * @since 2.0.00
      */
@@ -2350,14 +2747,14 @@ public class SOCPlayerClient
     {
         private final SOCPlayerClient client;
         private final GameManager gmgr;
-        
+
         public MessageTreater(SOCPlayerClient client)
         {
             if (client == null)
                 throw new IllegalArgumentException("client is null");
             this.client = client;
             gmgr = client.getGameManager();
-            
+
             if (gmgr == null)
                 throw new IllegalArgumentException("client game manager is null");
         }
@@ -2976,6 +3373,22 @@ public class SOCPlayerClient
                 handleSETSPECIALITEM(games, (SOCSetSpecialItem) mes);
                 break;
 
+            /**
+             * Localized i18n strings for game items.
+             * Added 2015-01-11 for v2.0.00.
+             */
+            case SOCMessage.LOCALIZEDSTRINGS:
+                handleLOCALIZEDSTRINGS((SOCLocalizedStrings) mes, isPractice);
+                break;
+
+            /**
+             * Updated scenario info.
+             * Added 2015-09-21 for v2.0.00.
+             */
+            case SOCMessage.SCENARIOINFO:
+                handleSCENARIOINFO((SOCScenarioInfo) mes, isPractice);
+                break;
+
             }  // switch (mes.getType())
         }
         catch (Exception e)
@@ -2993,18 +3406,23 @@ public class SOCPlayerClient
      * and display the version on the main panel.
      * (Local server's version is always {@link Version#versionNumber()}.)
      *
-     * @param isPractice Is the server {@link #practiceServer}, not remote?  Client can be connected
+     * @param isPractice Is the server {@link ClientNetwork#practiceServer}, not remote?  Client can be connected
      *                only to one at a time.
-     * @param mes  the messsage
+     * @param mes  the message
      */
     private void handleVERSION(final boolean isPractice, SOCVersion mes)
     {
         D.ebugPrintln("handleVERSION: " + mes);
         int vers = mes.getVersionNumber();
+
         if (! isPractice)
         {
             sVersion = vers;
-            gameDisplay.showVersion(vers, mes.getVersionString(), mes.getBuild());
+            sFeatures = (vers >= SOCServerFeatures.VERSION_FOR_SERVERFEATURES)
+                ? new SOCServerFeatures(mes.localeOrFeats)
+                : new SOCServerFeatures(true);
+
+            gameDisplay.showVersion(vers, mes.getVersionString(), mes.getBuild(), sFeatures);
         }
 
         // If we ever require a minimum server version, would check that here.
@@ -3057,22 +3475,33 @@ public class SOCPlayerClient
                     if (tooNewOpts.isEmpty())
                         tooNewOpts = null;
                 }
+
                 if (tooNewOpts != null)
                 {
                     if (! isPractice)
                         gameDisplay.optionsRequested();
                     gmgr.put(SOCGameOptionGetInfos.toCmd(tooNewOpts, withTokenI18n), isPractice);
                 }
+                else if (withTokenI18n && ! isPractice)
+                {
+                    // server is older than client but understands i18n: request gameopt localized strings
+
+                    gmgr.put(SOCGameOptionGetInfos.toCmd(null, true), false);  // sends opt list "-,?I18N"
+                }
             } else {
                 // server is too old to understand options. Can't happen with local practice srv,
                 // because that's our version (it runs from our own JAR file).
+
                 if (! isPractice)
+                {
                     tcpServGameOpts.noMoreOptions(true);
+                    tcpServGameOpts.optionSet = null;
+                }
             }
         } else {
             // sVersion == cliVersion, so we have same code as server for getAllKnownOptions.
             // For practice games, optionSet may already be initialized, so check vs null.
-            GameOptionServerSet opts = (isPractice ? practiceServGameOpts : tcpServGameOpts);
+            ServerGametypeInfo opts = (isPractice ? practiceServGameOpts : tcpServGameOpts);
             if (opts.optionSet == null)
                 opts.optionSet = SOCGameOption.getAllKnownOptions();
             opts.noMoreOptions(isPractice);  // defaults not known unless it's practice
@@ -3083,6 +3512,12 @@ public class SOCPlayerClient
      * handle the {@link SOCStatusMessage "status"} message.
      * Used for server events, also used if player tries to join a game
      * but their nickname is not OK.
+     *<P>
+     * Also used (v1.1.19 and newer) as a reply to {@link SOCAuthRequest} sent
+     * before showing {@link NewGameOptionsFrame}, so check whether the
+     * {@link SOCPlayerClient#isNGOFWaitingForAuthStatus isNGOFWaitingForAuthStatus client.isNGOFWaitingForAuthStatus}
+     * flag is set.
+     *
      * @param mes  the message
      * @param isPractice from practice server, not remote server?
      */
@@ -3100,42 +3535,69 @@ public class SOCPlayerClient
 
         gameDisplay.showStatus(statusText, srvDebugMode);
 
-        if (sv == SOCStatusMessage.SV_NEWGAME_OPTION_VALUE_TOONEW)
+        // Are we waiting for auth response in order to show NGOF?
+        if ((! isPractice) && client.isNGOFWaitingForAuthStatus)
         {
-            // Extract game name and failing game-opt keynames,
-            // and pop up an error message window.
-            String errMsg;
-            StringTokenizer st = new StringTokenizer(statusText, SOCMessage.sep2);
-            try
-            {
-                String gameName = null;
-                Vector<String> optNames = new Vector<String>();
-                errMsg = st.nextToken();
-                gameName = st.nextToken();
-                while (st.hasMoreTokens())
-                    optNames.addElement(st.nextToken());
-                StringBuffer opts = new StringBuffer();
-                final Map<String, SOCGameOption> knowns =
-                    isPractice ? practiceServGameOpts.optionSet : tcpServGameOpts.optionSet;
-                for (int i = 0; i < optNames.size(); ++i)
-                {
-                    opts.append('\n');
-                    String oname = optNames.elementAt(i);
-                    SOCGameOption oinfo = null;
-                    if (knowns != null)
-                        oinfo = knowns.get(oname);
-                    if (oinfo != null)
-                        oname = oinfo.desc;
-                    opts.append(strings.get("options.error.valuesproblem.which", oname));
-                }
-                errMsg = strings.get("options.error.valuesproblem", gameName, errMsg, opts.toString());
-            }
-            catch (Throwable t)
-            {
-                errMsg = statusText;  // fallback, not expected to happen
-            }
+            client.isNGOFWaitingForAuthStatus = false;
 
-            gameDisplay.showErrorDialog(errMsg, strings.get("base.cancel"));
+            if (sv == SOCStatusMessage.SV_OK)
+            {
+                client.gotPassword = true;
+
+                EventQueue.invokeLater(new Runnable()
+                {
+                    public void run()
+                    {
+                        gameDisplay.gameWithOptionsBeginSetup(false, true);
+                    }
+                });
+            }
+        }
+
+        switch (sv)
+        {
+        case SOCStatusMessage.SV_PW_WRONG:
+            gameDisplay.focusPassword();
+            break;
+
+        case SOCStatusMessage.SV_NEWGAME_OPTION_VALUE_TOONEW:
+            {
+                // Extract game name and failing game-opt keynames,
+                // and pop up an error message window.
+                String errMsg;
+                StringTokenizer st = new StringTokenizer(statusText, SOCMessage.sep2);
+                try
+                {
+                    String gameName = null;
+                    Vector<String> optNames = new Vector<String>();
+                    errMsg = st.nextToken();
+                    gameName = st.nextToken();
+                    while (st.hasMoreTokens())
+                        optNames.addElement(st.nextToken());
+                    StringBuffer opts = new StringBuffer();
+                    final Map<String, SOCGameOption> knowns =
+                        isPractice ? practiceServGameOpts.optionSet : tcpServGameOpts.optionSet;
+                    for (int i = 0; i < optNames.size(); ++i)
+                    {
+                        opts.append('\n');
+                        String oname = optNames.elementAt(i);
+                        SOCGameOption oinfo = null;
+                        if (knowns != null)
+                            oinfo = knowns.get(oname);
+                        if (oinfo != null)
+                            oname = oinfo.getDesc();
+                        opts.append(strings.get("options.error.valuesproblem.which", oname));
+                    }
+                    errMsg = strings.get("options.error.valuesproblem", gameName, errMsg, opts.toString());
+                }
+                catch (Throwable t)
+                {
+                    errMsg = statusText;  // fallback, not expected to happen
+                }
+
+                gameDisplay.showErrorDialog(errMsg, strings.get("base.cancel"));
+            }
+            break;
         }
     }
 
@@ -3178,7 +3640,8 @@ public class SOCPlayerClient
 
     /**
      * handle the "list of channels" message; this message indicates that
-     * we're newly connected to the server.
+     * we're newly connected to the server, and is sent even if the server
+     * isn't using {@link SOCServerFeatures#FEAT_CHANNELS}.
      * @param mes  the message
      * @param isPractice is the server actually {@link ClientNetwork#practiceServer} (practice game)?
      */
@@ -4385,12 +4848,12 @@ public class SOCPlayerClient
     /**
      * process the "game option get defaults" message.
      * If any default option's keyname is unknown, ask the server.
-     * @see GameOptionServerSet
+     * @see ServerGametypeInfo
      * @since 1.1.07
      */
     private void handleGAMEOPTIONGETDEFAULTS(SOCGameOptionGetDefaults mes, final boolean isPractice)
     {
-        GameOptionServerSet opts;
+        ServerGametypeInfo opts;
         if (isPractice)
             opts = practiceServGameOpts;
         else
@@ -4409,11 +4872,7 @@ public class SOCPlayerClient
             if (! isPractice)
                 gameDisplay.optionsRequested();
 
-            final boolean withTokenI18n =
-                (isPractice || (sVersion >= SOCStringManager.VERSION_FOR_I18N))
-                && (cliLocale != null)
-                && ! ("en".equals(cliLocale.getLanguage()) && "US".equals(cliLocale.getCountry()));
-            gmgr.put(SOCGameOptionGetInfos.toCmd(unknowns, withTokenI18n), isPractice);
+            gmgr.put(SOCGameOptionGetInfos.toCmd(unknowns, wantsI18nStrings(isPractice)), isPractice);
         } else {
             opts.newGameWaitingForOpts = false;
             gameDisplay.optionsReceived(opts, isPractice);
@@ -4422,18 +4881,18 @@ public class SOCPlayerClient
 
     /**
      * process the "game option info" message
-     * by calling {@link GameOptionServerSet#receiveInfo(SOCGameOptionInfo)}.
+     * by calling {@link ServerGametypeInfo#receiveInfo(SOCGameOptionInfo)}.
      * If all are now received, possibly show game info/options window for new game or existing game.
      *<P>
      * For a summary of the flags and variables involved with game options,
      * and the client/server interaction about their values, see
-     * {@link GameOptionServerSet}.
+     * {@link ServerGametypeInfo}.
      *
      * @since 1.1.07
      */
     private void handleGAMEOPTIONINFO(SOCGameOptionInfo mes, final boolean isPractice)
     {
-        GameOptionServerSet opts;
+        ServerGametypeInfo opts;
         if (isPractice)
             opts = practiceServGameOpts;
         else
@@ -4445,7 +4904,7 @@ public class SOCPlayerClient
             hasAllNow = opts.receiveInfo(mes);
         }
 
-        boolean isDash = mes.getOptionNameKey().equals("-");  // I18N: skip this
+        boolean isDash = mes.getOptionNameKey().equals("-");  // I18N: do not localize "-" keyname
         gameDisplay.optionsReceived(opts, isPractice, isDash, hasAllNow);
     }
 
@@ -4501,6 +4960,77 @@ public class SOCPlayerClient
     }
 
     /**
+     * Localized i18n strings for game items.
+     * Added 2015-01-11 for v2.0.00.
+     * @param isPractice  Is the server {@link ClientNetwork#practiceServer}, not remote?
+     */
+    private void handleLOCALIZEDSTRINGS(final SOCLocalizedStrings mes, final boolean isPractice)
+    {
+        final List<String> str = mes.getParams();
+        final String type = str.get(0);
+
+        if (type.equals(SOCLocalizedStrings.TYPE_GAMEOPT))
+        {
+            final int L = str.size();
+            for (int i = 1; i < L; i += 2)
+            {
+                SOCGameOption opt = SOCGameOption.getOption(str.get(i), false);
+                if (opt != null)
+                {
+                    final String desc = str.get(i + 1);
+                    if (! desc.equals(SOCLocalizedStrings.EMPTY))
+                        opt.setDesc(desc);
+                }
+            }
+
+        }
+        else if (type.equals(SOCLocalizedStrings.TYPE_SCENARIO))
+        {
+            localizeGameScenarios
+                (str, true, mes.isFlagSet(SOCLocalizedStrings.FLAG_SENT_ALL), isPractice);
+        }
+        else
+        {
+            System.err.println("L4916: Unknown localized string type " + type);
+        }
+    }
+
+    /**
+     * Updated scenario info.
+     * Added 2015-09-21 for v2.0.00.
+     * @param isPractice  Is the server {@link ClientNetwork#practiceServer}, not remote?
+     */
+    private void handleSCENARIOINFO(final SOCScenarioInfo mes, final boolean isPractice)
+    {
+        ServerGametypeInfo opts;
+        if (isPractice)
+            opts = practiceServGameOpts;
+        else
+            opts = tcpServGameOpts;
+
+        if (mes.noMoreScens)
+        {
+            synchronized (opts)
+            {
+                opts.allScenStringsReceived = true;
+                opts.allScenInfoReceived = true;
+            }
+        } else {
+            final String scKey = mes.getScenarioKey();
+
+            if (mes.isKeyUnknown)
+                SOCScenario.removeUnknownScenario(scKey);
+            else
+                SOCScenario.addKnownScenario(mes.getScenario());
+
+            synchronized (opts)
+            {
+                opts.scenKeys.add(scKey);  // OK if was already present from received localized strings
+            }
+        }
+    }
+
+    /**
      * handle the "player stats" message
      * @since 1.1.09
      */
@@ -4516,7 +5046,8 @@ public class SOCPlayerClient
 
         final int[] rstat = mes.getParams();
 
-        EnumMap<PlayerClientListener.UpdateType, Integer> stats = new EnumMap<PlayerClientListener.UpdateType, Integer>(PlayerClientListener.UpdateType.class);
+        EnumMap<PlayerClientListener.UpdateType, Integer> stats
+            = new EnumMap<PlayerClientListener.UpdateType, Integer>(PlayerClientListener.UpdateType.class);
         stats.put(PlayerClientListener.UpdateType.Clay, Integer.valueOf(rstat[SOCResourceConstants.CLAY]));
         stats.put(PlayerClientListener.UpdateType.Ore, Integer.valueOf(rstat[SOCResourceConstants.ORE]));
         stats.put(PlayerClientListener.UpdateType.Sheep, Integer.valueOf(rstat[SOCResourceConstants.SHEEP]));
@@ -4691,12 +5222,16 @@ public class SOCPlayerClient
 
         final int coord = mes.getParam1();
         final int pv = mes.getParam2();
+        SOCPlayingPiece updatePiece = null;  // if not null, call pcl.pieceValueUpdated
 
         if (ga.isGameOptionSet(SOCGameOption.K_SC_CLVI))
         {
             SOCVillage vi = ((SOCBoardLarge) (ga.getBoard())).getVillageAtNode(coord);
             if (vi != null)
+            {
                 vi.setCloth(pv);
+                updatePiece = vi;
+            }
         }
         else if (ga.isGameOptionSet(SOCGameOption.K_SC_PIRI))
         {
@@ -4704,11 +5239,15 @@ public class SOCPlayerClient
             if (fort != null)
             {
                 fort.setStrength(pv);
-
-                PlayerClientListener pcl = clientListeners.get(gaName);
-                if (pcl != null)
-                    pcl.pieceValueUpdated(fort);
+                updatePiece = fort;
             }
+        }
+
+        if (updatePiece != null)
+        {
+            PlayerClientListener pcl = clientListeners.get(gaName);
+            if (pcl != null)
+                pcl.pieceValueUpdated(updatePiece);
         }
     }
 
@@ -4826,23 +5365,110 @@ public class SOCPlayerClient
         case SOCSetSpecialItem.OP_PICK:
             // fall through
         case SOCSetSpecialItem.OP_DECLINE:
-            pcl.playerPickSpecialItem(typeKey, ga, pl, gi, pi, (mes.op == SOCSetSpecialItem.OP_PICK), mes.coord, mes.level);
+            pcl.playerPickSpecialItem(typeKey, ga, pl, gi, pi, (mes.op == SOCSetSpecialItem.OP_PICK),
+                mes.coord, mes.level, mes.sv);
             break;
         }
     }
 
     }  // nested class MessageTreater
 
+
     /**
-     * add a new game to the initial window's list of games, and possibly
+     * Should this client request localized strings (I18N) from the server if available?
+     * Checks server version, checks whether client locale differs from the fallback {@code "en_US"}.
+     * @param isPractice  True if checking for local practice server, not a remote server
+     * @return  True if client should request localized strings
+     * @since 2.0.00
+     */
+    final boolean wantsI18nStrings(final boolean isPractice)
+    {
+        return (isPractice || (sVersion >= SOCStringManager.VERSION_FOR_I18N))
+            && (cliLocale != null)
+            && ! ("en".equals(cliLocale.getLanguage()) && "US".equals(cliLocale.getCountry()));
+    }
+
+    /**
+     * Check these game options to see if they contain a scenario we don't yet have full info about.
+     * If the options include a scenario and we don't have that scenario's info or localized strings,
+     * ask the server for that but don't wait here for a reply.
+     *<P>
+     * <B>Do not call for practice games:</B> Assumes this is the TCP server, because for practice games
+     * we already have full info about scenarios and their strings.
+     *
+     * @param opts  Game options to check for {@code "SC"}, or {@code null}
+     * @since 2.0.00
+     */
+    protected void checkGameoptsForUnknownScenario(final Map<String,SOCGameOption> opts)
+    {
+        if ((opts == null) || tcpServGameOpts.allScenInfoReceived || ! opts.containsKey("SC"))
+            return;
+
+        final String scKey = opts.get("SC").getStringValue();
+        if ((scKey.length() == 0) || tcpServGameOpts.scenKeys.contains(scKey))
+            return;
+
+        net.putNet(new SOCScenarioInfo(scKey, false).toCmd());
+    }
+
+    /**
+     * Localize {@link SOCScenario} names and descriptions with strings from the server.
+     * Updates scenario data in {@link #practiceServGameOpts} or {@link #tcpServGameOpts}.
+     *
+     * @param scStrs  Scenario localized strings, same format as {@link SOCLocalizedStrings} params.
+     * @param skipFirst  If true skip the first element of {@code scStrs}, it isn't a scenario keyname.
+     * @param sentAll  True if no further strings will be received; is {@link SOCLocalizedStrings#FLAG_SENT_ALL} set?
+     *     If true, sets {@link ServerGametypeInfo#allScenStringsReceived}.
+     * @param isPractice  Is the server {@link ClientNetwork#practiceServer}, not remote?
+     * @since 2.0.00
+     */
+    protected void localizeGameScenarios
+        (final List<String> scStrs, final boolean skipFirst, final boolean sentAll, final boolean isPractice)
+    {
+        ServerGametypeInfo opts = (isPractice ? practiceServGameOpts : tcpServGameOpts);
+
+        final int L = scStrs.size();
+        int i = (skipFirst) ? 1 : 0;
+        while (i < L)
+        {
+            final String scKey = scStrs.get(i);
+            ++i;
+            opts.scenKeys.add(scKey);
+
+            final String nm = scStrs.get(i);
+            ++i;
+
+            if (nm.equals(SOCLocalizedStrings.MARKER_KEY_UNKNOWN))
+                continue;
+
+            String desc = scStrs.get(i);
+            ++i;
+
+            SOCScenario sc = SOCScenario.getScenario(scKey);
+            if ((sc != null) && ! nm.equals(SOCLocalizedStrings.EMPTY))
+            {
+                if ((desc != null) && desc.equals(SOCLocalizedStrings.EMPTY))
+                    desc = null;
+
+                sc.setDesc(nm, desc);
+            }
+        }
+
+        if (sentAll)
+            opts.allScenStringsReceived = true;
+    }
+
+    /**
+     * Add a new game to the initial window's list of games, and possibly
      * to the {@link #serverGames server games list}.
      *
      * @param gameName the game name to add to the list;
-     *                 may have the prefix {@link SOCGames#MARKER_THIS_GAME_UNJOINABLE}
+     *            may have the prefix {@link SOCGames#MARKER_THIS_GAME_UNJOINABLE}
      * @param gameOptsStr String of packed {@link SOCGameOption game options}, or null
      * @param addToSrvList Should this game be added to the list of remote-server games?
-     *                 Practice games should not be added.
-     *                 The {@link #serverGames} list also has a flag for cannotJoin.
+     *            Practice games should not be added.
+     *            The {@link #serverGames} list also has a flag for cannotJoin.
+     * @see GameDisplay#addToGameList(boolean, String, String, boolean)
      */
     public void addToGameList(String gameName, String gameOptsStr, final boolean addToSrvList)
     {
@@ -4853,7 +5479,7 @@ public class SOCPlayerClient
         }
         gameDisplay.addToGameList(hasUnjoinMarker, gameName, gameOptsStr, addToSrvList);
     }
-    
+
     /** If we're playing in a game that's just finished, update the scores.
      *  This is used to show the true scores, including hidden
      *  victory-point cards, at the game's end.
@@ -4895,9 +5521,12 @@ public class SOCPlayerClient
     {
         return gameManager;
     }
-    
+
+
     /**
      * Nested class for processing outgoing messages (putting).
+     *<P>
+     * Before v2.0.00, most of these fields and methods were part of the main {@link SOCPlayerClient} class.
      * @author paulbilnoski
      * @since 2.0.00
      */
@@ -5261,13 +5890,32 @@ public class SOCPlayerClient
 
     /**
      * The current user wants to play a special {@link soc.game.SOCInventoryItem SOCInventoryItem}.
+     * Send the server a {@link SOCInventoryItemAction}{@code (currentPlayerNumber, PLAY, itype, rc=0)} message.
      * @param ga     the game
-     * @param itype  the special item type picked by player, from {@link soc.game.SOCInventoryItem#itype SOCInventoryItem.itype}
+     * @param itype  the special inventory item type picked by player,
+     *     from {@link soc.game.SOCInventoryItem#itype SOCInventoryItem.itype}
      */
     public void playInventoryItem(SOCGame ga, final int itype)
     {
         put(SOCInventoryItemAction.toCmd
             (ga.getName(), ga.getCurrentPlayerNumber(), SOCInventoryItemAction.PLAY, itype, 0), ga.isPractice);
+    }
+
+    /**
+     * The current user wants to pick a {@link SOCSpecialItem Special Item}.
+     * Send the server a {@link SOCSetSpecialItem}{@code (PICK, typeKey, gi, pi, owner=-1, coord=-1, level=0)} message.
+     * @param ga  Game
+     * @param typeKey  Special item type.  Typically a {@link SOCGameOption} keyname; see the {@link SOCSpecialItem}
+     *     class javadoc for details.
+     * @param gi  Game Item Index, as in {@link SOCGame#getSpecialItem(String, int)} or
+     *     {@link SOCSpecialItem#playerPickItem(String, SOCGame, SOCPlayer, int, int)}, or -1
+     * @param pi  Player Item Index, as in {@link SOCSpecialItem#playerPickItem(String, SOCGame, SOCPlayer, int, int)},
+     *     or -1
+     */
+    public void pickSpecialItem(SOCGame ga, final String typeKey, final int gi, final int pi)
+    {
+        put(new SOCSetSpecialItem
+            (ga.getName(), SOCSetSpecialItem.OP_PICK, typeKey, gi, pi, -1).toCmd(), ga.isPractice);
     }
 
     /**
@@ -5417,7 +6065,9 @@ public class SOCPlayerClient
             msg += (" " + piece.getCoordinates());
             put(SOCGameTextMsg.toCmd(ga.getName(), client.nickname, msg), ga.isPractice);
         }
+
     }  // nested class GameManager
+
 
     /**
      * @return true if name is on the ignore list
@@ -5616,6 +6266,7 @@ public class SOCPlayerClient
         return net;
     }
 
+
     /**
      * Helper object to encapsulate and deal with network connectivity.
      *<P>
@@ -5624,6 +6275,8 @@ public class SOCPlayerClient
      * Local tcp server (if any) is started in {@link #initLocalServer(int)}.
      *<br>
      * Network shutdown is {@link #disconnect()} or {@link #dispose()}.
+     *<P>
+     * Before v2.0.00, most of these fields and methods were part of the main {@link SOCPlayerClient} class.
      *
      * @author Paul Bilnoski &lt;paul@bilnoski.net&gt;
      * @since 2.0.00
@@ -5666,7 +6319,10 @@ public class SOCPlayerClient
         Thread reader = null;
 
         /**
-         * Network error (TCP communication), or null.
+         * Any network error (TCP communication) received while connecting
+         * or sending messages in {@link #putNet(String)}, or null.
+         * If {@code ex != null}, putNet will refuse to send.
+         *<P>
          * The exception's {@link Throwable#toString() toString()} including its
          * {@link Throwable#getMessage() getMessage()} may be displayed to the user
          * by {@link SOCPlayerClient#dispose()}; if throwing an error that the user
@@ -5680,6 +6336,7 @@ public class SOCPlayerClient
         /**
          * Are we connected to a TCP server (remote or {@link #localTCPServer})?
          * {@link #practiceServer} is not a TCP server.
+         * @see #ex
          */
         boolean connected = false;
 
@@ -5687,8 +6344,8 @@ public class SOCPlayerClient
         protected String lastMessage_N, lastMessage_P;
 
         /**
-         * Server for practice games via {@link #prCli}; not connected to
-         * the network, not suited for multi-player games. Use {@link #localTCPServer}
+         * Server for practice games via {@link #prCli}; not connected to the network,
+         * not suited for hosting multi-player games. Use {@link #localTCPServer}
          * for those.
          * SOCMessages of games where {@link SOCGame#isPractice} is true are sent
          * to practiceServer.
@@ -5767,12 +6424,12 @@ public class SOCPlayerClient
                 }
             }
 
-            // Ask practice server to create the game
+            // Ask internal practice server to create the game
             if (gameOpts == null)
-                putPractice(SOCJoinGame.toCmd(client.nickname, client.password, getHost(), practiceGameName));
+                putPractice(SOCJoinGame.toCmd(client.nickname, "", getHost(), practiceGameName));
             else
                 putPractice(SOCNewGameWithOptionsRequest.toCmd
-                    (client.nickname, client.password, getHost(), practiceGameName, gameOpts));
+                    (client.nickname, "", getHost(), practiceGameName, gameOpts));
         }
 
         /**
@@ -5857,11 +6514,11 @@ public class SOCPlayerClient
          * and version was sent in reply to server's version.
          *
          * @param chost  Server host to connect to, or {@code null} for localhost
-         * @param port   Server TCP port to connect to; the default server port is {@link ClientNetwork#SOC_PORT_DEFAULT}.
+         * @param sPort  Server TCP port to connect to; the default server port is {@link ClientNetwork#SOC_PORT_DEFAULT}.
          * @throws IllegalStateException if already connected
          * @see soc.server.SOCServer#newConnection1(StringConnection)
          */
-        public synchronized void connect(String chost, int cport)
+        public synchronized void connect(String chost, int sPort)
             throws IllegalStateException
         {
             if (connected)
@@ -5872,15 +6529,21 @@ public class SOCPlayerClient
 
             ex = null;
             host = chost;
-            port = cport;
+            port = sPort;
 
-            String hostString = (chost != null ? chost : "localhost") + ":" + cport;
+            String hostString = (chost != null ? chost : "localhost") + ":" + sPort;
             System.out.println(/*I*/"Connecting to " + hostString/*18N*/);  // I18N: Not localizing console output yet
             client.gameDisplay.setMessage
                 (client.strings.get("pcli.message.connecting.serv"));  // "Connecting to server..."
 
             try
             {
+                if (client.gotPassword)
+                {
+                    client.gameDisplay.setPassword(client.password);
+                        // when ! gotPassword, GameAwtDisplay.getPassword() will read pw from there
+                    client.gotPassword = false;
+                }
                 s = new Socket(host, port);
                 in = new DataInputStream(s.getInputStream());
                 out = new DataOutputStream(s.getOutputStream());
@@ -5978,11 +6641,15 @@ public class SOCPlayerClient
          * write a message to the net: either to a remote server,
          * or to {@link #localTCPServer} for games we're hosting.
          *<P>
-         * This message is copied to {@link #lastMessage_N}; any error sets {@link #ex}.
+         * If {@link #ex} != null, or ! {@link #connected}, {@code putNet}
+         * returns false without attempting to send the message.
+         *<P>
+         * This message is copied to {@link #lastMessage_N}; any error sets {@link #ex}
+         * and calls {@link SOCPlayerClient#dispose()} to show the error message.
          *
          * @param s  the message
          * @return true if the message was sent, false if not
-         * @see #put(String, boolean)
+         * @see SOCPlayerClient.GameManager#put(String, boolean)
          */
         public synchronized boolean putNet(String s)
         {
@@ -6023,7 +6690,7 @@ public class SOCPlayerClient
          *
          * @param s  the message
          * @return true if the message was sent, false if not
-         * @see #put(String, boolean)
+         * @see SOCPlayerClient.GameManager#put(String, boolean)
          */
         public synchronized boolean putPractice(String s)
         {
@@ -6081,7 +6748,8 @@ public class SOCPlayerClient
 
             return canPractice;
         }
-        
+
+
         /**
          * A task to continuously read from the server socket.
          * Not used for talking to the practice server.
@@ -6125,6 +6793,7 @@ public class SOCPlayerClient
             }
 
         }  // nested class NetReadTask
+
 
         /**
          * For practice games, reader thread to get messages from the
@@ -6181,6 +6850,7 @@ public class SOCPlayerClient
         }  // nested class SOCPlayerLocalStringReader
 
     }  // nested class ClientNetwork
+
 
     /** React to windowOpened, windowClosing events for GameAwtDisplay's Frame. */
     private static class ClientWindowAdapter extends WindowAdapter
@@ -6251,14 +6921,15 @@ public class SOCPlayerClient
 
     }  // nested class ClientWindowAdapter
 
+
     /**
      * TimerTask used soon after client connect, to prevent waiting forever for
      * {@link SOCGameOptionInfo game options info}
      * (assume slow connection or server bug).
      * Set up when sending {@link SOCGameOptionGetInfos GAMEOPTIONGETINFOS}.
      *<P>
-     * When timer fires, assume no more options will be received.
-     * Call {@link SOCPlayerClient#handleGAMEOPTIONINFO(SOCGameOptionInfo, boolean) handleGAMEOPTIONINFO("-",false)}
+     * When timer fires, assume no more options will be received. Call
+     * {@link SOCPlayerClient.MessageTreater#handleGAMEOPTIONINFO(SOCGameOptionInfo, boolean) handleGAMEOPTIONINFO("-",false)}
      * to trigger end-of-list behavior at client.
      * @author jdmonin
      * @since 1.1.07
@@ -6266,9 +6937,9 @@ public class SOCPlayerClient
     private static class GameOptionsTimeoutTask extends TimerTask
     {
         public GameAwtDisplay pcli;
-        public GameOptionServerSet srvOpts;
+        public ServerGametypeInfo srvOpts;
 
-        public GameOptionsTimeoutTask (GameAwtDisplay c, GameOptionServerSet opts)
+        public GameOptionsTimeoutTask (GameAwtDisplay c, ServerGametypeInfo opts)
         {
             pcli = c;
             srvOpts = opts;
@@ -6294,7 +6965,7 @@ public class SOCPlayerClient
      * {@link SOCGameOption game option defaults}.
      * (in case of slow connection or server bug).
      * Set up when sending {@link SOCGameOptionGetDefaults GAMEOPTIONGETDEFAULTS}
-     * in {@link SOCPlayerClient#gameWithOptionsBeginSetup(boolean)}.
+     * in {@link SOCPlayerClient.GameAwtDisplay#gameWithOptionsBeginSetup(boolean, boolean)}.
      *<P>
      * When timer fires, assume no defaults will be received.
      * Display the new-game dialog.
@@ -6304,10 +6975,10 @@ public class SOCPlayerClient
     private static class GameOptionDefaultsTimeoutTask extends TimerTask
     {
         public GameAwtDisplay pcli;
-        public GameOptionServerSet srvOpts;
+        public ServerGametypeInfo srvOpts;
         public boolean forPracticeServer;
 
-        public GameOptionDefaultsTimeoutTask (GameAwtDisplay c, GameOptionServerSet opts, boolean forPractice)
+        public GameOptionDefaultsTimeoutTask (GameAwtDisplay c, ServerGametypeInfo opts, boolean forPractice)
         {
             pcli = c;
             srvOpts = opts;
@@ -6323,180 +6994,11 @@ public class SOCPlayerClient
             pcli.gameOptsDefsTask = null;  // Clear reference to this soon-to-expire obj
             srvOpts.noMoreOptions(true);
             if (srvOpts.newGameWaitingForOpts)
-                pcli.gameWithOptionsBeginSetup(forPracticeServer);
+                pcli.gameWithOptionsBeginSetup(forPracticeServer, false);
         }
 
     }  // GameOptionDefaultsTimeoutTask
 
-
-    /**
-     * Track the server's valid game option set.
-     * One instance for remote tcp server, one for practice server.
-     * Not doing getters/setters - Synchronize on the object to set/read its fields.
-     *<P>
-     * Interaction with client-server messages at connect:
-     *<OL>
-     *<LI> First, this object is created; <tt>allOptionsReceived</tt> false,
-     *     <tt>newGameWaitingForOpts</tt> false.
-     *     <tt>optionSet</tt> is set at client from {@link SOCGameOption#getAllKnownOptions()}.
-     *<LI> At server connect, ask and receive info about options, if our version and the
-     *     server's version differ.  Once this is done, <tt>allOptionsReceived</tt> == true.
-     *<LI> When user wants to create a new game, <tt>askedDefaultsAlready</tt> is false;
-     *     ask server for its defaults (current option values for any new game).
-     *     Also set <tt>newGameWaitingForOpts</tt> = true.
-     *<LI> Server will respond with its current option values.  This sets
-     *     <tt>defaultsReceived</tt> and updates <tt>optionSet</tt>.
-     *     It's possible that the server's defaults contain option names that are
-     *     unknown at our version.  If so, <tt>allOptionsReceived</tt> is cleared, and we ask the
-     *     server about those specific options.
-     *     Otherwise, clear <tt>newGameWaitingForOpts</tt>.
-     *<LI> If waiting on option info from defaults above, the server replies with option info.
-     *     (They may remain as type {@link SOCGameOption#OTYPE_UNKNOWN}.)
-     *     Once these are all received, set <tt>allOptionsReceived</tt> = true,
-     *     clear <tt>newGameWaitingForOpts</tt>.
-     *<LI> Once  <tt>newGameWaitingForOpts</tt> == false, show the {@link NewGameOptionsFrame}.
-     *</OL>
-     *
-     * @author jdmonin
-     * @since 1.1.07
-     */
-    public static class GameOptionServerSet
-    {
-        /**
-         * If true, we know all options on this server,
-         * or the server is too old to support options.
-         */
-        public boolean   allOptionsReceived = false;
-
-        /**
-         * If true, we've asked the server about defaults or options because
-         * we're about to create a new game.  When all are received,
-         * we should create and show a NewGameOptionsFrame.
-         */
-        public boolean   newGameWaitingForOpts = false;
-
-        /**
-         * If non-null, we're waiting to hear about game options because
-         * user has clicked 'game info' on a game.  When all are
-         * received, we should create and show a NewGameOptionsFrame
-         * with that game's options.
-         */
-        public String    gameInfoWaitingForOpts = null;
-
-        /**
-         * Options will be null if {@link SOCPlayerClient#sVersion}
-         * is less than {@link SOCNewGameWithOptions#VERSION_FOR_NEWGAMEWITHOPTIONS}.
-         * Otherwise, set from {@link SOCGameOption#getAllKnownOptions()}
-         * and update from server as needed.
-         */
-        public Map<String,SOCGameOption> optionSet = null;
-
-        /** Have we asked the server for default values? */
-        public boolean   askedDefaultsAlready = false;
-
-        /** Has the server told us defaults? */
-        public boolean   defaultsReceived = false;
-
-        /**
-         * If {@link #askedDefaultsAlready}, the time it was asked,
-         * as returned by {@link System#currentTimeMillis()}.
-         */
-        public long askedDefaultsTime;
-
-        public GameOptionServerSet()
-        {
-            optionSet = SOCGameOption.getAllKnownOptions();
-        }
-
-        /**
-         * The server doesn't have any more options to send (or none at all, from its version).
-         * Set fields as if we've already received the complete set of options, and aren't waiting
-         * for any more.
-         * @param askedDefaults Should we also set the askedDefaultsAlready flag? It not, leave it unchanged.
-         */
-        public void noMoreOptions(boolean askedDefaults)
-        {
-            allOptionsReceived = true;
-            if (askedDefaults)
-            {
-                defaultsReceived = true;
-                askedDefaultsAlready = true;
-                askedDefaultsTime = System.currentTimeMillis();
-            }
-        }
-
-        /**
-         * Set of default options has been received from the server, examine them.
-         * Sets allOptionsReceived, defaultsReceived, optionSet.  If we already have non-null optionSet,
-         * merge (update the values) instead of replacing the entire set with servOpts.
-         *
-         * @param servOpts The allowable {@link SOCGameOption} received from the server.
-         *                 Assumes has been parsed already against the locally known opts,
-         *                 so ones that we don't know are {@link SOCGameOption#OTYPE_UNKNOWN}.
-         * @return null if all are known, or a Vector of key names for unknown options.
-         */
-        public List<String> receiveDefaults(final Map<String,SOCGameOption> servOpts)
-        {
-            // Although javadoc says "update the values", replacing the option objects does the
-            // same thing; we already have parsed servOpts for all obj fields, including current value.
-            // Option objects are always accessed by key name, so replacement is OK.
-
-            if ((optionSet == null) || optionSet.isEmpty())
-            {
-                optionSet = servOpts;
-            } else {
-                for (String oKey : servOpts.keySet())
-                {
-                    SOCGameOption op = servOpts.get(oKey);
-                    SOCGameOption oldcopy = optionSet.get(oKey);
-                    if (oldcopy != null)
-                        optionSet.remove(oKey);
-                    optionSet.put(oKey, op);  // Even OTYPE_UNKNOWN are added
-                }
-            }
-
-            List<String> unknowns = SOCVersionedItem.findUnknowns(servOpts);
-            allOptionsReceived = (unknowns == null);
-            defaultsReceived = true;
-            return unknowns;
-        }
-
-        /**
-         * After calling receiveDefaults, call this as each GAMEOPTIONGETINFO is received.
-         * Updates allOptionsReceived.
-         *
-         * @param gi  Message from server with info on one parameter
-         * @return true if all are known, false if more are unknown after this one
-         */
-        public boolean receiveInfo(SOCGameOptionInfo gi)
-        {
-            String oKey = gi.getOptionNameKey();
-            SOCGameOption oinfo = gi.getOptionInfo();
-            SOCGameOption oldcopy = optionSet.get(oKey);
-
-            if ((oinfo.key.equals("-")) && (oinfo.optType == SOCGameOption.OTYPE_UNKNOWN))
-            {
-                // end-of-list marker: no more options from server.
-                // That is end of srv's response to cli sending GAMEOPTIONGETINFOS("-").
-                noMoreOptions(false);
-                return true;
-            } else {
-                // remove old, replace with new from server (if any)
-                if (oldcopy != null)
-                {
-                    optionSet.remove(oKey);
-                    final SOCGameOption.ChangeListener cl = oldcopy.getChangeListener();
-                    if (cl != null)
-                        oinfo.addChangeListener(cl);
-                }
-                SOCGameOption.addKnownOption(oinfo);
-                if (oinfo.optType != SOCGameOption.OTYPE_UNKNOWN)
-                    optionSet.put(oKey, oinfo);
-                return false;
-            }
-        }
-
-    }  // class GameOptionServerSet
 
     /**
      * Applet methods to display the main screen (list of games), separated out from main GUI class.
@@ -6507,7 +7009,7 @@ public class SOCPlayerClient
     {
         SOCPlayerClient client;
         GameAwtDisplay gameDisplay;
-        
+
         /**
          * Retrieve a parameter and translate to a hex value.
          *

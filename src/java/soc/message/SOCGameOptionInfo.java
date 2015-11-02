@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * This file Copyright (C) 2009,2012-2013 Jeremy D Monin <jeremy@nand.net>
+ * This file Copyright (C) 2009,2012-2013,2015 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -20,10 +20,15 @@
  **/
 package soc.message;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import soc.game.SOCGameOption;
+import soc.game.SOCScenario;   // for javadocs only
+import soc.game.SOCVersionedItem;
 
 /**
- * Information on one available {@link SOCGameOption game option}.
+ * Information on one available {@link SOCGameOption} game option.
  * Reply from server to a client's {@link SOCGameOptionGetInfos GAMEOPTIONGETINFOS} message.
  * Provides the option's information, including default value and current value at the
  * server for new games.  In v2.0.00+ the option description can be localized for the client.
@@ -31,18 +36,22 @@ import soc.game.SOCGameOption;
  * If the server doesn't know this option, the returned option type is
  * {@link SOCGameOption#OTYPE_UNKNOWN}.
  * If the client asks about an option too new for it to use,
+ * by sending the option name or GAMEOPTIONGETINFOS("-"),
  * the server will respond with {@link SOCGameOption#OTYPE_UNKNOWN}.
  *<P>
  * Special case: If the client is asking for any new options, by sending
  * GAMEOPTIONGETINFOS("-"), but there aren't any new options, server responds with
- * {@link #OPTINFO_NO_MORE_OPTS}, a GAMEOPTIONINFO named "-" with type OTYPE_UNKNOWN.
+ * {@link #OPTINFO_NO_MORE_OPTS}, a GAMEOPTIONINFO named "-" with type {@code OTYPE_UNKNOWN}.
  *<P>
- * This is so clients can find out about options which were
+ * This message is for clients to find out about options which were
  * introduced in versions newer than the client's version, but which
  * may be applicable to their version or all versions.
  *<P>
  * Introduced in 1.1.07; check client version against {@link SOCNewGameWithOptions#VERSION_FOR_NEWGAMEWITHOPTIONS}
  * before sending this message.
+ *<P>
+ * In v2.0.00 and newer, {@link SOCScenario} info is also synchronized with similar logic;
+ * see {@link SOCScenarioInfo}.
  *<P>
  * Robot clients don't need to know about or handle this message type,
  * because they don't create or browse games.
@@ -77,76 +86,80 @@ public class SOCGameOptionInfo extends SOCMessageTemplateMs
      * @param op  Option to send
      * @param cliVers  Client's version number; 1107 is version 1.1.07
      * @param localDesc  i18n localized option description, or {@code null} to use
-     *            {@link soc.game.SOCVersionedItem#desc SOCGameOption.desc}
+     *            {@link soc.game.SOCVersionedItem#getDesc() SOCGameOption.getDesc()}
      */
     public SOCGameOptionInfo(final SOCGameOption op, final int cliVers, final String localDesc)
     {
+        super(GAMEOPTIONINFO, null, new ArrayList<String>());
+
         // OTYPE_*
-        super(GAMEOPTIONINFO, null,
-            new String[12 + ( ((op.optType != SOCGameOption.OTYPE_ENUM)
-                               && (op.optType != SOCGameOption.OTYPE_ENUMBOOL))
-                            ? 0
-                            : op.maxIntValue ) ]);
         opt = op;
-        pa[0] = op.key;
-        pa[1] = Integer.toString(op.optType);
-        pa[2] = Integer.toString(op.minVersion);
-        pa[3] = Integer.toString(op.lastModVersion);
-        pa[4] = (op.defaultBoolValue ? "t" : "f");
-        pa[5] = Integer.toString(op.defaultIntValue);
-        pa[6] = Integer.toString(op.minIntValue);
-        pa[7] = Integer.toString(op.maxIntValue);
-        pa[8] = (op.getBoolValue() ? "t" : "f");
+        /* [0] */ pa.add(op.key);
+        /* [1] */ pa.add(Integer.toString(op.optType));
+        /* [2] */ pa.add(Integer.toString(op.minVersion));
+        /* [3] */ pa.add(Integer.toString(op.lastModVersion));
+        /* [4] */ pa.add(op.defaultBoolValue ? "t" : "f");
+        /* [5] */ pa.add(Integer.toString(op.defaultIntValue));
+        /* [6] */ pa.add(Integer.toString(op.minIntValue));
+        /* [7] */ pa.add(Integer.toString(op.maxIntValue));
+        /* [8] */ pa.add(op.getBoolValue() ? "t" : "f");
         if ((op.optType == SOCGameOption.OTYPE_STR) || (op.optType == SOCGameOption.OTYPE_STRHIDE))
         {
             String sv = op.getStringValue();
             if (sv.length() == 0)
                 sv = EMPTYSTR;  // can't parse a null or 0-length pa[9]
-            pa[9] = sv;
+            /* [9] */ pa.add(sv);
         } else {
-            pa[9] = Integer.toString(op.getIntValue());
+            /* [9] */ pa.add(Integer.toString(op.getIntValue()));
         }
         if (cliVers < 2000)
-            pa[10] = (op.hasFlag(SOCGameOption.FLAG_DROP_IF_UNUSED) ? "t" : "f");
+            /* [10] */ pa.add(op.hasFlag(SOCGameOption.FLAG_DROP_IF_UNUSED) ? "t" : "f");
         else
-            pa[10] = Integer.toString(op.optFlags);
+            /* [10] */ pa.add(Integer.toString(op.optFlags));
 
-        pa[11] = (localDesc != null) ? localDesc : op.desc;
+        /* [11] */ pa.add((localDesc != null) ? localDesc : op.getDesc());
 
         // for OTYPE_ENUM, _ENUMBOOL, pa[12+] are the enum choices' string values
         if ((op.optType == SOCGameOption.OTYPE_ENUM) || (op.optType == SOCGameOption.OTYPE_ENUMBOOL))
-            System.arraycopy(op.enumVals, 0, pa, 12, op.enumVals.length);
+            for (final String ev : op.enumVals)
+                pa.add(ev);
     }
 
     /**
      * Constructor for client to parse server's reply about a game option.
      * If opt type number is unknown locally, will change to {@link SOCGameOption#OTYPE_UNKNOWN}.
      *
-     * @param pa Parameters of the option: <pre>
-     * pa[0] = key (name of the option)
-     * pa[1] = type
-     * pa[2] = minVersion
-     * pa[3] = lastModVersion
-     * pa[4] = defaultBoolValue ('t' or 'f')
-     * pa[5] = defaultIntValue
-     * pa[6] = minIntValue
-     * pa[7] = maxIntValue
-     * pa[8] = boolValue ('t' or 'f'; current, not default)
-     * pa[9] = intValue (current, not default) or stringvalue
-     * pa[10] = optFlags as integer -- before v2.0.00, only FLAG_DROP_IF_UNUSED ('t' or 'f')
-     * pa[11] = desc (displayed text) if present; required for all but OTYPE_UNKNOWN
-     * pa[12] and beyond, if present = each enum choice's text </pre>
+     * @param pal  The option's parameters:
+     *<UL>
+     * <LI> pal[0] = key (technical name of the option, from {@link SOCVersionedItem#key})
+     * <LI> pal[1] = type
+     * <LI> pal[2] = minVersion
+     * <LI> pal[3] = lastModVersion
+     * <LI> pal[4] = defaultBoolValue ('t' or 'f')
+     * <LI> pal[5] = defaultIntValue
+     * <LI> pal[6] = minIntValue
+     * <LI> pal[7] = maxIntValue
+     * <LI> pal[8] = boolValue ('t' or 'f'; current, not default)
+     * <LI> pal[9] = intValue (current, not default) or stringvalue
+     * <LI> pal[10] = optFlags as integer -- before v2.0.00, only FLAG_DROP_IF_UNUSED ('t' or 'f')
+     * <LI> pal[11] = desc (displayed text) if present; required for all types except {@code OTYPE_UNKNOWN}
+     * <LI> pal[12] and beyond, if present = each enum choice's text
+     *</UL>
      *
-     * @throws IllegalArgumentException if pa.length < 11, or type is not a valid {@link SOCGameOption#optType};
-     *      if type isn't {@link SOCGameOption#OTYPE_ENUM OTYPE_ENUM} or ENUMBOOL, pa.length must == 12 (or 11 for OTYPE_UNKNOWN).
-     * @throws NumberFormatException    if pa integer-field contents are incorrectly formatted.
+     * @throws IllegalArgumentException if pal's length &lt; 11, or type is not a valid {@link SOCGameOption#optType};
+     *      if type isn't {@link SOCGameOption#OTYPE_ENUM OTYPE_ENUM} or ENUMBOOL,
+     *      pal's length must == 12 (or 11 for OTYPE_UNKNOWN).
+     * @throws NumberFormatException    if pal integer-field contents are incorrectly formatted.
      */
-    protected SOCGameOptionInfo(String[] pa)
+    protected SOCGameOptionInfo(List<String> pal)
         throws IllegalArgumentException, NumberFormatException
     {
-	super(GAMEOPTIONINFO, null, pa);
-	if (pa.length < 11)
-	    throw new IllegalArgumentException("pa.length");
+	super(GAMEOPTIONINFO, null, pal);
+	final int L = pal.size();
+	if (L < 11)
+	    throw new IllegalArgumentException("pal.size");
+
+	final String[] pa = pal.toArray(new String[L]);
 
 	// OTYPE_*
 	int otyp = Integer.parseInt(pa[1]);
@@ -251,7 +264,7 @@ public class SOCGameOptionInfo extends SOCMessageTemplateMs
      */
     public String getOptionNameKey()
     {
-        return pa[0];
+        return pa.get(0);
     }
 
     /**
@@ -264,28 +277,31 @@ public class SOCGameOptionInfo extends SOCMessageTemplateMs
     }
 
     /**
-     * Parse the command String array into a SOCGameOptionInfo message. <pre>
-     * pa[0] = key (name of the {@link SOCGameOption option})
-     * pa[1] = type
-     * pa[2] = minVersion
-     * pa[3] = lastModVersion
-     * pa[4] = defaultBoolValue ('t' or 'f')
-     * pa[5] = defaultIntValue
-     * pa[6] = minIntValue
-     * pa[7] = maxIntValue
-     * pa[8] = boolValue ('t' or 'f'; current, not default)
-     * pa[9] = intValue (current, not default) or stringvalue
-     * pa[10] = dropIfUnused ('t' or 'f')
-     * pa[11] = desc (displayed text) if present; required for all but OTYPE_UNKNOWN
-     * pa[12] and beyond, if present = each enum choice's text </pre>
+     * Parse the command String array into a SOCGameOptionInfo message.
+     *<UL>
+     * <LI> pa[0] = key (option's technical name, from {@link SOCVersionedItem#key})
+     * <LI> pa[1] = type
+     * <LI> pa[2] = minVersion
+     * <LI> pa[3] = lastModVersion
+     * <LI> pa[4] = defaultBoolValue ('t' or 'f')
+     * <LI> pa[5] = defaultIntValue
+     * <LI> pa[6] = minIntValue
+     * <LI> pa[7] = maxIntValue
+     * <LI> pa[8] = boolValue ('t' or 'f'; current, not default)
+     * <LI> pa[9] = intValue (current, not default) or stringvalue
+     * <LI> pa[10] = dropIfUnused ('t' or 'f')
+     * <LI> pa[11] = desc (displayed text) if present; required for all types except {@code OTYPE_UNKNOWN}
+     * <LI> pa[12] and beyond, if present = each enum choice's text
+     *</UL>
      *
      * @param pa   the String parameters
      * @return    a GameOptionInfo message, or null if parsing errors
      */
-    public static SOCGameOptionInfo parseDataStr(String[] pa)
+    public static SOCGameOptionInfo parseDataStr(List<String> pa)
     {
-        if ((pa == null) || (pa.length < 11))
+        if ((pa == null) || (pa.size() < 11))
             return null;
+
         try
         {
             return new SOCGameOptionInfo(pa);

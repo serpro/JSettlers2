@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2007-2014 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012 Paul Bilnoski <paul@bilnoski.net>
  *
  * This program is free software; you can redistribute it and/or
@@ -21,6 +21,7 @@ package soc.message;
 
 import java.io.Serializable;
 
+import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.NoSuchElementException;
 import java.util.StringTokenizer;
@@ -53,7 +54,7 @@ import java.util.StringTokenizer;
  * <LI> Decide on the message type name.  Add to the end of the constant list in this
  *      class.  Add a comment to note the JSettlers version in which it was introduced, and the date.
  * <LI> If the new message is for something that any kind of game can use,
- *      give it the next available type ID number in the list (11xx).
+ *      give it the next available type ID number in the list (1xxx).
  *      If the message is specific to the JSettlers game and its interface,
  *      use a message number above 10000.  The intention is that other kinds of games
  *      can be played eventually within this server framework.
@@ -62,7 +63,7 @@ import java.util.StringTokenizer;
  *      If your message class extends SOCMessageTemplateMs or SOCMessageTemplateMi,
  *      instead call <tt>yourMessageType.parseDataStr(multiData)</tt>.
  * <LI> If the message contains a game name, your new class must implement {@link SOCMessageForGame}.
- * <LI> Extend the SOCMessage class, including the required parseDataStr method.
+ * <LI> Extend the SOCMessage class or a template class, including the required parseDataStr method.
  *      ({@link SOCRevealFogHex} and {@link SOCSetTurn} are good example subclasses.)
  *      Template parent-classes can help; the example subclasses extend them.
  *      Be sure to override the minimum version reported in {@link #getMinimumVersion()}.
@@ -94,12 +95,21 @@ import java.util.StringTokenizer;
  */
 public abstract class SOCMessage implements Serializable, Cloneable
 {
+    private static final long serialVersionUID = 2000L;  // last structural change v2.0.00
+
     /**
      * message type IDs.
      * This list of constants does not provide javadocs, instead please see
      * the SOCMessage subclass for the message type.
      * Example: For {@link #DELETEGAME}, see javadocs for {@link SOCDeleteGame}.
      */
+
+    /**
+     * Authentication request, to do so without creating or joining a game or channel; see {@link SOCAuthRequest}.
+     * @since 1.1.19
+     */
+    public static final int AUTHREQUEST = 999;
+
     public static final int NULLMESSAGE = 1000;
     public static final int NEWCHANNEL = 1001;
     public static final int MEMBERS = 1002;
@@ -299,6 +309,16 @@ public abstract class SOCMessage implements Serializable, Cloneable
      *  @since 2.0.00 */
     public static final int SETSPECIALITEM = 1104;  // Special Items, 20140416, v2.0.00
 
+    /** {@link SOCLocalizedStrings} - Localized i18n strings for items such as game options or scenarios.
+     *  @since 2.0.00 */
+    public static final int LOCALIZEDSTRINGS = 1105;  // Localized strings, 20150111, v2.0.00
+
+    /** {@link SOCScenarioInfo} - Client's request about available {@link soc.game.SOCScenario SOCScenario}s,
+     *  or server's reply about a single scenario.
+     * @since 2.0.00
+     */
+    public static final int SCENARIOINFO = 1106;    // Scenario info, 20150920, v2.0.00
+
 
     /////////////////////////////////////////
     // REQUEST FOR FUTURE MESSAGE NUMBERS: //
@@ -330,6 +350,19 @@ public abstract class SOCMessage implements Serializable, Cloneable
     public static final char sep_char = '|';
     /** secondary separator token {@link #sep2}, as character. SEP2 is ','. */
     public static final char sep2_char = ',';
+
+    /**
+     * "Not for any game" marker, used when any of the {@code SOCMessageTemplate*} message types
+     * (which all implement {@link SOCMessageForGame}) are used for convenience for non-game messages
+     * such as {@link SOCLocalizedStrings}.
+     *<P>
+     * No actual game, option, or scenario will ever have the same name as this marker, because the marker fails
+     * {@link #isSingleLineAndSafe(String, boolean) isSingleLineAndSafe(String, false)} by
+     * including a control character.
+     *
+     * @since 2.0.00
+     */
+    public static final String GAME_NONE = "\026";  // 0x16 ^V (SYN)
 
     /**
      * An ID identifying the type of message
@@ -424,7 +457,7 @@ public abstract class SOCMessage implements Serializable, Cloneable
     /**
      * For use in toString: Append string enum contents to stringbuffer,
      * formatted as "a,b,c,d,e".
-     * @param sv  Enum of String to append. 0 length is allowed, null is not allowed.
+     * @param se  Enum of String to append. 0 length is allowed, null is not allowed.
      * @param sb  StringBuffer to which <tt>se</tt> will be appended, as "a,b,c,d,e"
      * @throws ClassCastException if <tt>se.nextElement()</tt> returns non-String
      * @throws NullPointerException if <tt>se</tt> or <tt>sb</tt> is null
@@ -499,9 +532,11 @@ public abstract class SOCMessage implements Serializable, Cloneable
             && ((-1 != s.indexOf(sep_char))
                 || (-1 != s.indexOf(sep2_char))))
             return false;
+
         int i = s.length();
         if (i == 0)
             return false;
+
         --i;
         for (; i>=0; --i)
         {
@@ -511,22 +546,6 @@ public abstract class SOCMessage implements Serializable, Cloneable
                 return false;
         }
         return true;
-    }
-
-    /**
-     * Utility, place one string into a new single-element array.
-     * To assist with {@link SOCMessageMulti} parsing.
-     *
-     * @param s  String to place into array, or null
-     * @return New single-element array containing s, or null if s null.
-     */
-    public static String[] toSingleElemArray(String s)
-    {
-        if (s == null)
-            return null;
-        String[] sarr = new String[1];
-        sarr[0] = s;
-        return sarr;
     }
 
     /**
@@ -557,21 +576,26 @@ public abstract class SOCMessage implements Serializable, Cloneable
             /**
              * to handle {@link SOCMessageMulti} subclasses -
              * multiple parameters with sub-fields.
-             * If only one param is seen, this will be null;
-             * use {@link #toSingleElemArray(String)} to build it.
+             * If only 1 param is seen, this will be null; pass {@code data} to your parseDataStr too.
              *<P>
              * Note that if you passed a non-null gamename to the
              * {@link SOCMessageTemplateMs} or {@link SOCMessageTemplateMi} constructor,
              * then multiData[0] here will be gamename,
              * and multiData[1] == param[0] as passed to that constructor.
+             *<P>
+             *<H5>If your message never expects 1 parameter:</H5>
              *<code>
-             *     case POTENTIALSETTLEMENTS:
-             *         if (multiData == null)
-             *             multiData = toSingleElemArray(data);
-             *         return SOCPotentialSettlements.parseDataStr(multiData);
+             *     case GAMESWITHOPTIONS:
+             *         return SOCGamesWithOptions.parseDataStr(multiData);
+             *</code>
+             *
+             *<H5>If your message might be valid with 1 parameter:</H5>
+             *<code>
+             *     case GAMESWITHOPTIONS:
+             *         return SOCGamesWithOptions.parseDataStr(data, multiData);
              *</code>
              */
-            String[] multiData = null;
+            ArrayList<String> multiData = null;
 
             try
             {
@@ -581,15 +605,15 @@ public abstract class SOCMessage implements Serializable, Cloneable
                         // SOCMessageMulti
 
                         int n = st.countTokens();  // remaining (== number of parameters after "data")
-                        multiData = new String[n+1];
-                        multiData[0] = data;
-                        for (int i = 1; st.hasMoreTokens(); ++i)
+                        multiData = new ArrayList<String>(n + 1);
+                        multiData.add(data);
+                        while (st.hasMoreTokens())
                         {
                                 try {
-                                        multiData[i] = st.nextToken();
+                                        multiData.add(st.nextToken());
                                 } catch (NoSuchElementException e)
                                 {
-                                        multiData[i] = null;
+                                        multiData.add(null);
                                 }
                         }
                 }
@@ -604,6 +628,9 @@ public abstract class SOCMessage implements Serializable, Cloneable
              */
             switch (msgId)
             {
+            case AUTHREQUEST:        // authentication request, 20141106, v1.1.19
+                return SOCAuthRequest.parseDataStr(data);
+
             case NULLMESSAGE:
                 return null;
 
@@ -921,6 +948,12 @@ public abstract class SOCMessage implements Serializable, Cloneable
 
             case SETSPECIALITEM:       // Special Items, 20140416, v2.0.00
                 return SOCSetSpecialItem.parseDataStr(data);
+
+            case LOCALIZEDSTRINGS:     // Localized strings, 20150111, v2.0.00
+                return SOCLocalizedStrings.parseDataStr(multiData);
+
+            case SCENARIOINFO:         // Scenario info, 20150920, v2.0.00
+                return SOCScenarioInfo.parseDataStr(multiData);
 
             default:
                 System.err.println("Unhandled message type in SOCMessage.toMsg: " + msgId);

@@ -1,6 +1,6 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
- * This file Copyright (C) 2014 Jeremy D Monin <jeremy@nand.net>
+ * This file Copyright (C) 2014-2015 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -21,6 +21,8 @@ package soc.game;
 
 import java.util.ArrayList;
 import java.util.List;
+
+import soc.message.SOCMessage;  // strictly for isSingleLineAndSafe
 
 
 /**
@@ -43,7 +45,11 @@ import java.util.List;
  * See {@link SOCSpecialItem.Requirement} javadoc for more details.  To check requirements,
  * call {@link SOCSpecialItem#checkRequirements(SOCPlayer, boolean)}.
  *<P>
- * <B>Non-Networked Fields:</B><BR>
+ * <H5>Optional Fields:</H5>
+ * Some {@code typeKey}s may use the {@link #getLevel()} and {@link #getStringValue()} fields;
+ * their meaning is type-specific.
+ *<P>
+ * <H5>Non-Networked Fields:</H5>
  * The cost and requirement fields are initialized at the server and at the client, not sent over the network.
  * Because of their limited and known use, it's easier to set them up in a factory method here than to create,
  * send, and parse messages with all details of the game's Special Items.  If a new Special Item type is created
@@ -63,12 +69,19 @@ import java.util.List;
  *  In this scenario, the game has a list of unique "Wonders", indexed 1 to {@link SOCGame#maxPlayers} + 1.
  *  (The 6-player game includes another copy of the first two wonders.)
  *  To win the game, a player must take ownership of exactly one of these, and build 4 levels of it.
+ *<P>
  *  A reference to the player's {@code SOCSpecialItem} is kept in the game's Special Item list, and also placed
  *  at index 0 of the player's Special Item list.
+ *<P>
+ *  This scenario uses the {@link #getStringValue()} field to identify the wonder object with a localized name:
+ *  "w1" is the Theater, "w5" is the Cathedral, etc. The 6-player game includes another copy of
+ *  the first two wonders: 2 special items will have "w1", 2 will have "w2".
  *
  *<UL>
  * <LI> On their own turn, a player can {@code PICK} a wonder from the game's list.  Each player can pick at most 1;
  *    no other player can pick the same one.  If they are able to pick that wonder, doing so builds its first level.
+ *    When sending a PICK request, the wonder's game item index and player item index must meet the requirements
+ *    of {@link SOCScenario#K_SC_WOND}.
  * <LI> Game state must be {@link SOCGame#PLAY1 PLAY1}
  * <LI> There are requirements ({@link #req}) to pick each wonder, different wonders have different requirements
  * <LI> There is a resource cost to build each level, different wonders have different costs
@@ -119,6 +132,19 @@ public class SOCSpecialItem
     };
 
     /**
+     * {@link #sv} for the Wonders in the {@link SOCGameOption#K_SC_WOND _SC_WOND} scenario.
+     * {@code sv} is used in this scenario to identify the wonder with a localized name.
+     * Index 0 unused.  The 6-player game includes another copy of the first two wonders.
+     * Used by {@link #makeKnownItem(String, int)}.
+     */
+    private static final String[] SV_SC_WOND = { null, "w1", "w2", "w3", "w4", "w5", "w1", "w2" };
+
+    /**
+     * Item's optional game item index, or -1, as used with {@link SOCGame#getSpecialItem(String, int, int, int)}.
+     */
+    protected int gameItemIndex;
+
+    /**
      * The player who owns this item, if any. Will be null for certain items
      * which belong to the game and not to players.
      */
@@ -129,6 +155,9 @@ public class SOCSpecialItem
 
     /** Optional level of construction or strength, or 0. */
     protected int level;
+
+    /** Optional string value field, or null; this field's meaning is specific to the item's {@code typeKey}. */
+    protected String sv;
 
     /**
      * Optional cost to buy, use, or build the next level, or {@code null}.
@@ -145,6 +174,7 @@ public class SOCSpecialItem
     /**
      * Create a scenario/expansion's special item if known. This is a factory method for game setup convenience.
      * The known item's {@link #req requirements} and cost will be filled from static data.
+     * Sets {@link #getGameIndex()} to {@code idx}.
      *<P>
      * Currently known {@code typeKey}s:
      *<UL>
@@ -169,6 +199,7 @@ public class SOCSpecialItem
 
         final String[] typeReqs = REQ_SC_WOND;
         final int[][] typeCosts = COST_SC_WOND;
+        final String[] typeSV = SV_SC_WOND;
 
         final SOCResourceSet costRS;
         if ((idx < 0) || (idx >= typeCosts.length))
@@ -180,8 +211,12 @@ public class SOCSpecialItem
         }
 
         final String req = ((idx < 0) || (idx >= typeReqs.length)) ? null : typeReqs[idx];
+        final String sv = ((idx < 0) || (idx >= typeSV.length)) ? null : typeSV[idx];
 
-        return new SOCSpecialItem(null, -1, costRS, req);
+        final SOCSpecialItem si = new SOCSpecialItem(null, -1, 0, sv, costRS, req);
+        si.setGameIndex(idx);
+
+        return si;
     }
 
     /**
@@ -198,6 +233,7 @@ public class SOCSpecialItem
      * paid if this method returns {@code true}.  If the caller needs to know
      * the cost paid, call that method before this one.
      *<P>
+     * Currently only {@link SOCGameOption#K_SC_WOND _SC_WOND} is recognized as a {@code typeKey} here.
      * To see which scenario and option {@code typeKey}s use this method, and scenario-specific usage details,
      * see the {@link SOCSpecialItem} class javadoc.
      *<P>
@@ -222,7 +258,7 @@ public class SOCSpecialItem
         if ((pl.getPlayerNumber() != ga.getCurrentPlayerNumber()) || (ga.getGameState() != SOCGame.PLAY1))
             throw new IllegalStateException();
 
-        if (typeKey != SOCGameOption.K_SC_WOND)
+        if (! SOCGameOption.K_SC_WOND.equals(typeKey))
             throw new IllegalStateException("unknown typeKey: " + typeKey);
 
         // _SC_WOND
@@ -304,7 +340,7 @@ public class SOCSpecialItem
 
     /**
      * Make a new item, optionally owned by a player.
-     * Its optional Level will be 0.
+     * Its optional Level will be 0, string value will be {@code null}.
      *
      * @param pl  player who owns the item, or {@code null}
      * @param co  coordinates, or -1
@@ -317,34 +353,60 @@ public class SOCSpecialItem
     public SOCSpecialItem(SOCPlayer pl, final int co, SOCResourceSet cost, final String req)
         throws IllegalArgumentException
     {
-        this(pl, co, 0, cost, req);
+        this(pl, co, 0, null, cost, req);
     }
 
     /**
-     * Make a new item, optionally owned by a player, with a level.
+     * Make a new item, optionally owned by a player, with an optional level and string value.
      *
      * @param pl  player who owns the item, or {@code null}
      * @param co  coordinates, or -1
      * @param lv  current level of construction or strength, or 0
+     * @param sv  current string value (optional), or {@code null}.
+     *      Meaning is type-specific, see {@link #getStringValue()}.
+     *      If not {@code null}, must pass {@link SOCMessage#isSingleLineAndSafe(String)}.
      * @param cost  cost to buy, use, or build the next level, or null
      * @param req  requirements to buy, use, or build the next level, or null.
      *      If provided, this requirement specification string will be
      *      parsed by {@link SOCSpecialItem.Requirement#parse(String)}.
-     * @throws IllegalArgumentException  if {@code req != null} but isn't a syntactically valid specification
+     * @throws IllegalArgumentException  if {@code req != null} but isn't a syntactically valid specification,
+     *      or if {@code sv} fails {@link SOCMessage#isSingleLineAndSafe(String)}
      */
-    public SOCSpecialItem(SOCPlayer pl, final int co, final int lv, SOCResourceSet cost, final String req)
+    public SOCSpecialItem
+        (SOCPlayer pl, final int co, final int lv, final String sv, SOCResourceSet cost, final String req)
         throws IllegalArgumentException
     {
         player = pl;
         coord = co;
         level = lv;
+        this.sv = sv;
         this.cost = cost;
         this.req = (req != null) ? Requirement.parse(req) : null;
+
+        if ((sv != null) && ! SOCMessage.isSingleLineAndSafe(sv))
+            throw new IllegalArgumentException("sv");
+    }
+
+    /**
+     * Get this item's optional game item index, or -1 if none,
+     * as used with {@link SOCGame#getSpecialItem(String, int, int, int)}.
+     * @see #getPlayer()
+     */
+    public int getGameIndex()
+    {
+        return gameItemIndex;
+    }
+
+    /** Set this item's {@link #getGameIndex(). */
+    public void setGameIndex(final int gi)
+    {
+        gameItemIndex = gi;
     }
 
     /**
      * Get the player who owns this item, if any.
      * @return the owner of the item, or {@code null}
+     * @see #getGameIndex()
      */
     public SOCPlayer getPlayer()
     {
@@ -395,9 +457,29 @@ public class SOCSpecialItem
     }
 
     /**
+     * Get the current string value, if any, of this special item.
+     * This is an optional field whose meaning is specific to the item type (typeKey).
+     * @return  Current string value, or {@code null}
+     */
+    public String getStringValue()
+    {
+        return sv;
+    }
+
+    /**
+     * Set or clear the current string value of this special item.
+     * @param sv  New value, or {@code null} to clear
+     */
+    public void setStringValue(final String sv)
+    {
+        this.sv = sv;
+    }
+
+    /**
      * Get the optional cost to buy, use, or build the next level.
      * Not sent over the network; see {@link SOCSpecialItem class javadoc}.
      * @return  Cost, or {@code null}
+     * @see #checkCost(SOCPlayer)
      */
     public SOCResourceSet getCost()
     {
@@ -415,21 +497,33 @@ public class SOCSpecialItem
     }
 
     /**
+     * Does this player have resources for this special item's {@link #getCost()}, if any?
+     * @param pl  Player to check
+     * @return  True if cost is {@code null} or {@link SOCPlayer#getResources() pl.getResources()} contains the cost
+     * @see #checkRequirements(SOCPlayer, boolean)
+     */
+    public final boolean checkCost(final SOCPlayer pl)
+    {
+        return (cost == null) || pl.getResources().contains(cost);
+    }
+
+    /**
      * Does this player meet this special item's {@link #req} requirements?
      * @param pl  Player to check
      * @param checkCost  If true, also check the cost against player's current resources
      * @return  True if player meets the requirements, false otherwise; true if {@link #req} is null or empty.
-     *     If {@code checkCost} and {@link #cost} != null, false unless player's resources contain {@code cost}.
+     *     If {@code checkCost} and {@link #getCost()} != null, false unless player's resources contain {@code cost}.
      * @throws IllegalArgumentException if {@link #req} has an unknown requirement type,
      *     or refers to an Added Layout Part {@code "N1"} through {@code "N9"} that isn't defined in the board layout
      * @throws UnsupportedOperationException if requirement type S (Settlement) includes {@code atPort} location;
      *     this is not implemented
      * @see #checkRequirements(SOCPlayer, List)
+     * @see #checkCost(SOCPlayer)
      */
     public final boolean checkRequirements(final SOCPlayer pl, final boolean checkCost)
         throws IllegalArgumentException, UnsupportedOperationException
     {
-        if (checkCost && (cost != null) && ! pl.getResources().contains(cost))
+        if (checkCost && ! checkCost(pl))
             return false;
 
         return checkRequirements(pl, req);
@@ -600,6 +694,9 @@ public class SOCSpecialItem
      * A requirement is a minimum count of items (Settlements, Cities, Victory Points, or Length of player's longest
      * route) with an optional required position (at a Port, or at a list of special nodes) for at least one of the
      * Settlement or City items.
+     *<P>
+     * At the client, requirements are rendered in {@code SOCSpecialItemDialog.buildRequirementsText};
+     * if new fields or requirement types are added, please update that method.
      *
      * @see #parse(String)
      * @see SOCSpecialItem#checkRequirements(SOCPlayer, boolean)
@@ -781,6 +878,25 @@ public class SOCSpecialItem
             this.count = count;
             this.atPort = atPort;
             this.atCoordList = atCoordList;
+        }
+
+        /** String representation for debugging; same format as {@link #parse(String)}. */
+        public String toString()
+        {
+            StringBuilder sb = new StringBuilder();
+            if (count != 1)
+                sb.append(count);
+            sb.append(reqType);
+            if (atPort || (atCoordList != null))
+            {
+                sb.append('@');
+                if (atPort)
+                    sb.append('P');
+                else if (atCoordList != null)
+                    sb.append(atCoordList);
+            }
+
+            return sb.toString();
         }
     }
 

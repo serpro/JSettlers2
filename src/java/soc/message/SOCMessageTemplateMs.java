@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * This file Copyright (C) 2008-2012 Jeremy D Monin <jeremy@nand.net>
+ * This file Copyright (C) 2008-2012,2014-2015 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,6 +19,8 @@
  * The maintainer of this program can be reached at jsettlers@nand.net
  **/
 package soc.message;
+
+import java.util.List;
 
 // import java.util.StringTokenizer;
 
@@ -52,7 +54,8 @@ package soc.message;
  * For notes on the section you must add to {@link SOCMessage#toMsg(String)},
  * see {@link SOCMessageMulti}.
  *
- * @author Jeremy D Monin <jeremy@nand.net>
+ * @author Jeremy D Monin &lt;jeremy@nand.net&gt;
+ * @since 1.1.00
  */
 public abstract class SOCMessageTemplateMs extends SOCMessageMulti
     implements SOCMessageForGame
@@ -61,29 +64,38 @@ public abstract class SOCMessageTemplateMs extends SOCMessageMulti
 
     /**
      * Name of the game, or null if none.
+     * The server's message treater requires a non-null {@link #getGame()} for incoming messages
+     * from clients; see {@link SOCMessageForGame#getGame()} for details.
      */
     protected String game;
 
     /**
-     * Array of string parameters, or null if none.
+     * List of string parameters, or null if none.
+     *<P>
+     * Before v2.0.00, this was an array of Strings.
      */
-    protected String[] pa;
+    protected List<String> pa;
 
     /**
      * Create a new multi-message with string parameters.
      *
      * @param id  Message type ID
-     * @param ga  Name of game this message is for, or null if none
-     * @param parr   Parameters, or null if none
+     * @param ga  Name of game this message is for, or null if none. See {@link #getGame()} for details.
+     *     The server's message treater requires a non-null {@link #getGame()}
+     *     for incoming messages from clients; see {@link SOCMessageForGame#getGame()} for details.
+     * @param pal List of parameters, or null if none
      */
-    protected SOCMessageTemplateMs(int id, String ga, String[] parr)
+    protected SOCMessageTemplateMs(final int id, final String ga, final List<String> pal)
     {
         messageType = id;
         game = ga;
-        pa = parr;
+        pa = pal;
     }
 
     /**
+     * Get the game name; see {@link SOCMessageForGame#getGame()} for details.
+     * If not null, {@link #toCmd()} sends the game name before {@link #getParams()} contents, and
+     * at the receiver {@code parseDataStr(params)} will see that game name as the first parameter.
      * @return the name of the game, or null if none
      */
     public String getGame()
@@ -94,7 +106,7 @@ public abstract class SOCMessageTemplateMs extends SOCMessageMulti
     /**
      * @return the parameters, or null if none
      */
-    public String[] getParams()
+    public List<String> getParams()
     {
         return pa;
     }
@@ -113,50 +125,54 @@ public abstract class SOCMessageTemplateMs extends SOCMessageMulti
      * MESSAGETYPE [sep game] sep param1 sep param2 sep ...
      *
      * @param messageType The message type id
-     * @param ga  the game name, or null
-     * @param parr The parameter array, or null if no additional parameters;
-     *             elements of parr can be null.
+     * @param gaName  the game name, or null
+     * @param pal  The parameter list, or null if no additional parameters;
+     *             elements of {@code pal} can be null.
      * @return    the command string
      */
-    protected static String toCmd(final int messageType, String ga, String[] parr)
+    protected static String toCmd(final int messageType, final String gaName, final List<String> pal)
     {
-        StringBuffer sb = new StringBuffer(Integer.toString(messageType));
-        if (ga != null)
+        StringBuilder sb = new StringBuilder(Integer.toString(messageType));
+
+        if (gaName != null)
         {
             sb.append(sep);
-            sb.append(ga);
+            sb.append(gaName);
         }
-        if (parr != null)
+        if (pal != null)
         {
-            for (int i = 0; i < parr.length; ++i)
+            for (final String p : pal)
             {
                 sb.append(sep);
-                if (parr[i] != null)
-                    sb.append(parr[i]);
+                if (p != null)
+                    sb.append(p);
             }
         }
+
         return sb.toString();
     }
 
     /**
-     * Parse the command String into a MessageType message
+     * Parse the command String into a MessageType message.
+     * Calls {@link #MessageType(gaName, List)} constructor,
+     * see its javadoc for parameter details.
      *
      * @param s   the String parameters
-     * @return    a PotentialSettlements message, or null if parsing errors
-    public static SOCPotentialSettlements parseDataStr(String[] s)
+     * @return    a DiceResultResources message, or null if parsing errors
+    public static SOCDiceResultResources parseDataStr(List<String> s)
     {
-        String ga; // the game name
-        String[] sett; // the settlements
+        String gaName;  // the game name
+        String[] pa;    // the parameters
 
-        if ((s == null) || (s.length < 2))
-            return null;  // must have at least game + 1 settlement param
+        if ((s == null) || (s.size() < 2))
+            return null;  // must have at least game name + 1 further param
 
-        ga = s[0];
-        sett = new String[s.length - 1];
-        for (int i = 1; i < s.length; ++i)
-            sett[i-1] = s[i];
+        gaName = s.get(0);
+        pa = new String[s.size() - 1];
+        for (int i = 0; i < pa.length; ++i)
+            pa[i] = s.get(i + 1);
 
-        return new SOCPotentialSettlements(ga, sett);
+        return new SOCDiceResultResources(gaName, pa);
     }
     */
 
@@ -165,7 +181,8 @@ public abstract class SOCMessageTemplateMs extends SOCMessageMulti
      */
     public String toString()
     {
-        StringBuffer sb = new StringBuffer(getClassNameShort());
+        StringBuilder sb = new StringBuilder(getClassNameShort());
+
         if (game != null)
         {
             sb.append (":game=");
@@ -173,13 +190,14 @@ public abstract class SOCMessageTemplateMs extends SOCMessageMulti
         }
         if (pa != null)
         {
-            for (int i = 0; i < pa.length; ++i)
+            for (final String p : pa)
             {
                 sb.append("|p=");
-                if (pa[i] != null)
-                    sb.append(pa[i]);
+                if (p != null)
+                    sb.append(p);
             }
         }
+
         return sb.toString();
     }
 }

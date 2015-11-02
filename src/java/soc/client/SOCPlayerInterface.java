@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2007-2014 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012-2013 Paul Bilnoski <paul@bilnoski.net>
  *     - UI layer refactoring, GameStatistics, type parameterization, GUI API updates, etc
  *
@@ -309,19 +309,23 @@ public class SOCPlayerInterface extends Frame
     /**
      * the display for the players' hands.
      * Hands start at top-left and go clockwise.
+     * @see #clientHand
      */
     protected SOCHandPanel[] hands;
     
     /**
-     * Tracks our own hand within hands[], if we are
+     * Tracks our own hand within {@link #hands hands[]}, if we are
      * active in a game.  Null otherwise.
-     * Set by SOCHandPanel's removePlayer() and addPlayer() methods.
+     * Set by {@link SOCHandPanel}'s removePlayer() and addPlayer() methods
+     * by calling {@link #setClientHand(SOCHandPanel)}.
+     * @see #clientHandPlayerNum
      */
     protected SOCHandPanel clientHand;
 
     /**
-     * Player ID of clientHand, or -1.
-     * Set by SOCHandPanel's removePlayer() and addPlayer() methods.
+     * Player ID of {@link #clientHand}, or -1.
+     * Set by {@link SOCHandPanel}'s removePlayer() and addPlayer() methods
+     * by calling {@link #setClientHand(SOCHandPanel)}.
      */
     private int clientHandPlayerNum;
 
@@ -640,10 +644,7 @@ public class SOCPlayerInterface extends Frame
          * initialize the game board display and add it to the interface
          */
         boardPanel = new SOCBoardPanel(this);
-        if (! game.hasSeaBoard)
-            boardPanel.setBackground(new Color(112, 45, 10));  // brown
-        else
-            boardPanel.setBackground(new Color(63, 86, 139));  // sea blue
+        boardPanel.setBackground(new Color(63, 86, 139));  // sea blue; if ! hasSeaBoard, tiles won't fill entire area
         boardPanel.setForeground(Color.black);
         Dimension bpMinSz = boardPanel.getMinimumSize();
         boardPanel.setSize(bpMinSz.width, bpMinSz.height);
@@ -859,6 +860,8 @@ public class SOCPlayerInterface extends Frame
     /**
      * The game's count of development cards remaining has changed.
      * Update the display.
+     *<P>
+     * See also {@link ClientBridge#simpleAction(int, int, int, int)} with {@link SOCSimpleAction#DEVCARD_BOUGHT}.
      */
     public void updateDevCardCount()
     {
@@ -1217,6 +1220,17 @@ public class SOCPlayerInterface extends Frame
                     boardPanel.setDebugShowPotentialsFlag(flagnum, false, doSet);
                     return;
                 }
+
+                else if (sLower.indexOf("showcoord") == 4)
+                {
+                    boardPanel.setDebugShowCoordsFlag(true);
+                    return;
+                }
+                else if (sLower.indexOf("hidecoord") == 4)
+                {
+                    boardPanel.setDebugShowCoordsFlag(false);
+                    return;
+                }
             }
 
             final String msg = s + '\n';
@@ -1241,6 +1255,7 @@ public class SOCPlayerInterface extends Frame
      * @param cmd  Local client command string, which starts with \
      * @return true if a command was handled
      * @since 2.0.00
+     * @see SOCPlayerClient.GameAwtDisplay#doLocalCommand(String, String)
      */
     private boolean doLocalCommand(String cmd)
     {
@@ -1350,7 +1365,7 @@ public class SOCPlayerInterface extends Frame
     {
         if (confirmDialogFirst)
         {
-            new ResetBoardConfirmDialog(gameDisplay, this).run();
+            EventQueue.invokeLater(new ResetBoardConfirmDialog(gameDisplay, this));
             return;
             // ResetBoardConfirmDialog will call resetBoardRequest(false) if its Restart button is clicked
         }
@@ -1452,7 +1467,7 @@ public class SOCPlayerInterface extends Frame
 
             String requester = game.getPlayer(pnRequester).getName();
             boardResetVoteDia = new ResetBoardVoteDialog(gameDisplay, this, requester, gaOver);
-            boardResetVoteDia.showInNewThread();
+            EventQueue.invokeLater(boardResetVoteDia);
                // Separate thread so ours is not tied up; this allows server
                // messages to be received, and screen to refresh, if other
                // players vote before we do, or if voting is cancelled.
@@ -1748,6 +1763,24 @@ public class SOCPlayerInterface extends Frame
     }
 
     /**
+     * The client player's available resources have changed. Update displays if needed.
+     *<P>
+     * If any trade offers are currently showing, show or hide the offer Accept button
+     * depending on the updated set of available resources.
+     * @since 2.0.00
+     */
+    public void updateAtClientPlayerResources()
+    {
+        for (int i = 0; i < hands.length; ++i)
+        {
+            if (i == clientHandPlayerNum)
+                continue;
+
+            hands[i].updateCurrentOffer(true);
+        }
+    }
+
+    /**
      * A player has been awarded Special Victory Points (SVP), so announce those details.
      * Example: "Lily gets 2 Special Victory Points for settling a new island."
      * Only prints text, does not update SOCHandPanel's SVP or call {@link SOCPlayer#addSpecialVPInfo(int, String)}.
@@ -1813,7 +1846,7 @@ public class SOCPlayerInterface extends Frame
     public void showDiscardOrGainDialog(final int nd, final boolean isDiscard)
     {
         discardOrGainDialog = new SOCDiscardOrGainResDialog(this, nd, isDiscard);
-        discardOrGainDialog.setVisible(true);
+        EventQueue.invokeLater(discardOrGainDialog);  // calls setVisible(true)
     }
 
     /**
@@ -1834,18 +1867,18 @@ public class SOCPlayerInterface extends Frame
     public void showChoosePlayerDialog(final int count, final int[] pnums, final boolean allowChooseNone)
     {
         choosePlayerDialog = new SOCChoosePlayerDialog(this, count, pnums, allowChooseNone);
-        choosePlayerDialog.setVisible(true);
+        EventQueue.invokeLater(choosePlayerDialog);  // calls setVisible(true)
     }
 
     /**
      * Show the {@link ChooseRobClothOrResourceDialog} to choose what to rob from a player.
      * @param vpn  Victim player number
      * @since 2.0.00
-     * @see #showChoosePlayerDialog(int, int[])
+     * @see #showChoosePlayerDialog(int, int[], boolean)
      */
     public void showChooseRobClothOrResourceDialog(final int vpn)
     {
-        new ChooseRobClothOrResourceDialog(vpn).showInNewThread();
+        EventQueue.invokeLater(new ChooseRobClothOrResourceDialog(vpn));  // calls setVisible(true)
     }
 
     /**
@@ -1854,7 +1887,7 @@ public class SOCPlayerInterface extends Frame
     public void showMonopolyDialog()
     {
         monopolyDialog = new SOCMonopolyDialog(this);
-        monopolyDialog.setVisible(true);
+        EventQueue.invokeLater(monopolyDialog);  // calls setVisible(true)
     }
 
     /**
@@ -1865,15 +1898,14 @@ public class SOCPlayerInterface extends Frame
      */
     public void showScenarioInfoDialog()
     {
-        NewGameOptionsFrame.showScenarioInfoDialog
-            (game.getGameOptionStringValue("SC"), game.getGameOptions(), game.vp_winner, getGameDisplay(), this);
+        NewGameOptionsFrame.showScenarioInfoDialog(game, getGameDisplay(), this);
     }
 
     /**
      * Update interface after the server sends us a new board layout.
      * Call after setting game data and board data.
      * Calls {@link SOCBoardPanel#flushBoardLayoutAndRepaint()}.
-     * Updates display of board-related counters, such as {@link SOCBoardLarge#getCloth()}.
+     * Updates display of board-related counters, such as {@link soc.game.SOCBoardLarge#getCloth()}.
      * Not needed if calling {@link #resetBoard(SOCGame, int, int)}.
      * @since 2.0.00
      */
@@ -2083,6 +2115,8 @@ public class SOCPlayerInterface extends Frame
                 mesHp.updateValue(PlayerClientListener.UpdateType.Ship);
             } else {
                 game.moveShip((SOCShip) pp, moveToCoord);
+                if (mesHp == clientHand)
+                    mesHp.disableBankUndoButton();  // just in case; it probably wasn't enabled
             }
 
             if (debugShowPotentials[4] || debugShowPotentials[5] || debugShowPotentials[7])
@@ -2156,6 +2190,7 @@ public class SOCPlayerInterface extends Frame
      * <em>Threads:</em> The game's treater thread handles incoming client messages and calls
      * game methods that change state. Those same game methods will trigger the scenario events;
      * so, the treater thread will also run this <tt>gameEvent</tt> callback.
+     * GUI code should use {@link EventQueue#invokeLater(Runnable)}.
      *
      * @param ga  Game
      * @param evt Event code
@@ -2165,7 +2200,19 @@ public class SOCPlayerInterface extends Frame
      */
     public void gameEvent(final SOCGame ga, final SOCScenarioGameEvent evt, final Object detail)
     {
-        // stub for now
+        switch (evt)
+        {
+        case SGE_STARTPLAY_BOARD_SPECIAL_NODES_EMPTIED:
+            EventQueue.invokeLater(new Runnable()
+            {
+                public void run() { boardPanel.flushBoardLayoutAndRepaint(); }
+            });
+            break;
+
+        default:
+            // Most game events are ignored at the client.
+            // Default case does nothing, prevents a compiler warning.
+        }
     }
 
     /**
@@ -3072,6 +3119,10 @@ public class SOCPlayerInterface extends Frame
                 if (hpan.isClientPlayer())
                 {
                     hpan.updateValue(utype);
+
+                    // Because client player's available resources have changed,
+                    // update any trade offers currently showing (show or hide Accept button)
+                    pi.updateAtClientPlayerResources();
                 }
                 else
                 {
@@ -3314,23 +3365,26 @@ public class SOCPlayerInterface extends Frame
             case SOCSimpleAction.DEVCARD_BOUGHT:
                 {
                     pi.printKeyed("game.devcard.bought", plName);
-                    final String key;
-                    if (value1 > 1)
-                        key = "game.devcard.bought.xleft";  // "There are 5 cards left."
-                    else if (value1 == 1)
-                        key = "game.devcard.bought.1left";  // "There is 1 card left."
-                    else
-                        key = "game.devcard.bought.0left";  // "There are no more Development cards."
-                    pi.printKeyed(key, value1);
-                    break;
+                    final String remainKey;
+                    switch (value1)
+                    {
+                    case 0:
+                        remainKey = "game.devcard.bought.0left";  break;  // "There are no more Development cards."
+                    case 1:
+                        remainKey = "game.devcard.bought.1left";  break;  // "There is 1 card left."
+                    default:
+                        remainKey = "game.devcard.bought.xleft";  // "There are 5 cards left."
+                    }
+                    pi.printKeyed(remainKey, value1);
                 }
+                break;
 
             case SOCSimpleAction.TRADE_PORT_REMOVED:
                 {
                     boardUpdated();
                     pi.printKeyed("game.invitem.port.picked.up", plName);  // "{0} has picked up a trade port from the board."
-                    break;
                 }
+                break;
 
             default:
                 // ignore unknown action types
@@ -3358,21 +3412,31 @@ public class SOCPlayerInterface extends Frame
 
         public void playerPickSpecialItem
             (final String typeKey, final SOCGame ga, final SOCPlayer pl, final int gi, final int pi,
-             final boolean isPick, final int coord, final int level)
+             final boolean isPick, final int coord, final int level, final String sv)
         {
-            if (pl == null)
-                return;  // <--- Early return: So far, everything implemented is player-specific ---
+            if ((pl == null) && isPick)
+                return;  // <--- Early return: So far, every pick implemented is player-specific ---
 
             if (! typeKey.equals(SOCGameOption.K_SC_WOND))
                 return;  // <--- Early return: So far, the only known typeKey is _SC_WOND ---
 
             if (isPick)
             {
-                if (level == 1)
-                    this.pi.printKeyed("game.specitem.sc_wond.started", pl.getName()); // "{0} started building a Wonder!"
+                String iname = null;
+                final SOCSpecialItem itm = ga.getSpecialItem(typeKey, gi);
+                if (itm != null)
+                    iname = itm.getStringValue();
+                if (iname != null)
+                    iname = strings.get("game.specitem.sc_wond." + iname); // "w3" -> "Monument", etc
                 else
-                    this.pi.printKeyed("game.specitem.sc_wond.built", pl.getName(), level);
-                        // "{0} has built level # of their Wonder."
+                    iname = "# " + gi;
+
+                if (level == 1)
+                    this.pi.printKeyed("game.specitem.sc_wond.started", pl.getName(), iname);
+                        // "{0} started building a Wonder! ({1})"
+                else
+                    this.pi.printKeyed("game.specitem.sc_wond.built", pl.getName(), level, iname);
+                        // "{0} has built level # of their Wonder ({2})."
 
                 // TODO any visual effect?
             } else {
@@ -3454,14 +3518,7 @@ public class SOCPlayerInterface extends Frame
                 }
 
                 final String s = sb.toString();
-                EventQueue.invokeLater(new Runnable()
-                {
-                    public void run()
-                    {
-                        NotifyDialog.createAndShow(pi.getGameDisplay(), pi, s, null, true);
-                    }
-                });
-
+                NotifyDialog.createAndShow(pi.getGameDisplay(), pi, s, null, true);
             }
         }
 
@@ -3501,20 +3558,20 @@ public class SOCPlayerInterface extends Frame
 
         public void requestedTrade(SOCPlayer offerer)
         {
-            pi.getPlayerHandPanel(offerer.getPlayerNumber()).updateCurrentOffer();
+            pi.getPlayerHandPanel(offerer.getPlayerNumber()).updateCurrentOffer(false);
         }
 
         public void requestedTradeClear(SOCPlayer offerer)
         {
             if (offerer != null)
             {
-                pi.getPlayerHandPanel(offerer.getPlayerNumber()).updateCurrentOffer();
+                pi.getPlayerHandPanel(offerer.getPlayerNumber()).updateCurrentOffer(false);
             }
             else
             {
                 for (int i = 0; i < pi.game.maxPlayers; ++i)
                 {
-                    pi.getPlayerHandPanel(i).updateCurrentOffer();
+                    pi.getPlayerHandPanel(i).updateCurrentOffer(false);
                 }
             }
         }
@@ -3545,16 +3602,14 @@ public class SOCPlayerInterface extends Frame
      * This is the modal dialog to vote on another player's board reset request.
      * If game in progress, buttons are Reset and Continue Playing; default Continue.
      * If game is over, buttons are Restart and No thanks; default Restart.
-     * Start a new thread to show, so message treating can continue as other players vote.
+     *<P>
+     * Use {@link EventQueue#invokeLater(Runnable)} to show, so message treating can continue as other players vote.
      *
      * @author Jeremy D Monin &lt;jeremy@nand.net&gt;
      * @since 1.1.00
      */
     protected static class ResetBoardVoteDialog extends AskDialog implements Runnable
     {
-        /** Runs in own thread, to not tie up client's message-treater thread which initially shows the dialog. */
-        private Thread rdt;
-
         /** If true, don't call any methods from callbacks here */
         private boolean askedDisposeQuietly;
 
@@ -3580,7 +3635,6 @@ public class SOCPlayerInterface extends Frame
                     : strings.get("dialog.base.continue.playing")),  // "Continue playing"
                 null,
                 (gameIsOver ? 1 : 2));
-            rdt = null;
             askedDisposeQuietly = false;
         }
 
@@ -3614,40 +3668,10 @@ public class SOCPlayerInterface extends Frame
                 button2Chosen();
         }
 
-        /**
-         * Make a new thread and show() in that thread.
-         * Keep track of the thread, in case we need to dispose of it.
-         */
-        public void showInNewThread()
-        {
-            rdt = new Thread(this);
-            rdt.setDaemon(true);
-            rdt.setName("resetVoteDialog-" + pcli.getNickname());
-            rdt.start();  // run method will show the dialog
-        }
-
         public void disposeQuietly()
         {
             askedDisposeQuietly = true;
-            //FIXME: Thread#stop is unsafe, need to tell the thread to internally terminate
-            rdt.stop();
             dispose();
-        }
-
-        /**
-         * In new thread, show ourselves. Do not call
-         * directly; call {@link #showInNewThread()}.
-         */
-        public void run()
-        {
-            try
-            {
-                setVisible(true);
-            }
-            catch (ThreadDeath e) {}
-            catch (Throwable e) {
-                e.printStackTrace();
-            }
         }
 
     }  // class ResetBoardVoteDialog
@@ -3655,9 +3679,8 @@ public class SOCPlayerInterface extends Frame
     /**
      * Modal dialog to ask whether to move the robber or the pirate ship.
      * Use the AWT event thread to show, so message treating can continue while the dialog is showing.
-     * When the choice is made, calls {@link SOCPlayerClient.GameManager#choosePlayer(SOCGame, int)}
-     * with {@link SOCChoosePlayer#CHOICE_MOVE_ROBBER CHOICE_MOVE_ROBBER}
-     * or {@link SOCChoosePlayer#CHOICE_MOVE_PIRATE CHOICE_MOVE_PIRATE}.
+     * When the choice is made, calls {@link SOCPlayerClient.GameManager#chooseRobber(SOCGame)}
+     * or {@link SOCPlayerClient.GameManager#choosePirate(SOCGame)}.
      *
      * @author Jeremy D Monin &lt;jeremy@nand.net&gt;
      * @since 2.0.00
@@ -3707,22 +3730,6 @@ public class SOCPlayerInterface extends Frame
         @Override
         public void windowCloseChosen() { button1Chosen(); }
 
-        /**
-         * In the AWT event thread, show ourselves. Do not call directly;
-         * call {@link java.awt.EventQueue#invokeLater(Runnable) EventQueue.invokeLater(thisDialog)}.
-         */
-        public void run()
-        {
-            try
-            {
-                setVisible(true);
-            }
-            catch (ThreadDeath e) {}
-            catch (Throwable e) {
-                e.printStackTrace();
-            }
-        }
-
     }  // nested class ChooseMoveRobberOrPirateDialog
 
     /**
@@ -3737,15 +3744,12 @@ public class SOCPlayerInterface extends Frame
     {
         private static final long serialVersionUID = 2000L;
 
-        /** Runs in own thread, to not tie up client's message-treater thread. */
-        private Thread rdt;
-
         /** victim player number */
         private final int vpn;
 
         /**
          * Creates a new ChooseRobClothOrResourceDialog.
-         * To display the dialog, call {@link #showInNewThread()}.
+         * To display the dialog, call {@link EventQueue#invokeLater(Runnable)}.
          * @param vpn  Victim player number
          */
         protected ChooseRobClothOrResourceDialog(final int vpn)
@@ -3756,7 +3760,6 @@ public class SOCPlayerInterface extends Frame
                 strings.get("dialog.rob.sc_clvi.cloth"),  // "Steal Cloth"
                 strings.get("dialog.rob.sc_clvi.rsrc"),   // "Steal Resource"
                 null, 1);
-            rdt = null;
             this.vpn = vpn;
         }
 
@@ -3785,46 +3788,6 @@ public class SOCPlayerInterface extends Frame
          */
         @Override
         public void windowCloseChosen() { button2Chosen(); }
-
-        /**
-         * Make a new thread and show() in that thread.
-         * Keep track of the thread, in case we need to dispose of it.
-         */
-        public void showInNewThread()
-        {
-            rdt = new Thread(this);
-            rdt.setDaemon(true);
-            rdt.setName("ChooseRobClothOrResourceDialog");
-            rdt.start();  // run method will show the dialog
-        }
-
-        @Override
-        public void dispose()
-        {
-            if (rdt != null)
-            {
-                //FIXME: Thread#stop is unsafe, need to tell the thread to internally terminate
-                rdt.stop();
-                rdt = null;
-            }
-            super.dispose();
-        }
-
-        /**
-         * In new thread, show ourselves. Do not call
-         * directly; call {@link #showInNewThread()}.
-         */
-        public void run()
-        {
-            try
-            {
-                setVisible(true);
-            }
-            catch (ThreadDeath e) {}
-            catch (Throwable e) {
-                e.printStackTrace();
-            }
-        }
 
     }  // nested class ChooseRobClothOrResourceDialog
 
@@ -3875,15 +3838,6 @@ public class SOCPlayerInterface extends Frame
          */
         @Override
         public void windowCloseChosen() {}
-
-        /**
-         * In AWT event thread, show ourselves. Do not call directly unless on that thread;
-         * call {@link EventQueue#invokeLater(Runnable) EventQueue.invokeLater(thisDialog)}.
-         */
-        public void run()
-        {
-            setVisible(true);
-        }
 
     }  // nested class ResetBoardConfirmDialog
 
@@ -4042,7 +3996,7 @@ public class SOCPlayerInterface extends Frame
         /**
          * Create a new SOCPIDiscardOrPickMsgTask.
          * After creating, you must schedule it
-         * with {@link SOCPlayerClient#getEventTimer()}.{@link Timer#schedule(TimerTask, long) schedule(msgTask,delay)} .
+         * with {@link SOCPlayerClient.GameAwtDisplay#getEventTimer()}.{@link Timer#schedule(TimerTask, long) schedule(msgTask,delay)} .
          * @param spi  Our player interface
          * @param forDiscard  True for discard, false for picking gold-hex resources
          */

@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2007-2014 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012 Paul Bilnoski <paul@bilnoski.net>
  *
  * This program is free software; you can redistribute it and/or
@@ -46,6 +46,7 @@ import soc.game.SOCVillage;
 import soc.message.*;
 import soc.robot.SOCRobotClient;
 import soc.server.genericServer.LocalStringConnection;
+import soc.util.SOCServerFeatures;
 import soc.util.Version;
 
 import java.io.DataInputStream;
@@ -71,6 +72,10 @@ import java.util.Vector;
  * The {@link soc.robot.SOCRobotClient} is based on this client.
  * Because of this, some methods (such as {@link #handleVERSION(boolean, SOCVersion)})
  * assume the client and server are the same version.
+ *<P>
+ * Since client and server are the same version, this client ignores game option sync
+ * and scenario synchronization messages ({@link SOCGameOptionInfo}, {@link SOCScenarioInfo}).
+ * Being GUI-less, it ignores i18n localization messages ({@link SOCLocalizedStrings}).
  *
  * @author Robert S Thomas
  */
@@ -92,6 +97,14 @@ public class SOCDisplaylessPlayerClient implements Runnable
      * {@link #sLocalVersion} should always equal our own version.
      */
     protected int sVersion, sLocalVersion;
+
+    /**
+     * Server's active optional features, sent soon after connect, or null if unknown.
+     * {@link #sLocalFeatures} goes with our locally hosted server, if any.
+     * @since 1.1.19
+     */
+    protected SOCServerFeatures sFeatures, sLocalFeatures;
+
     protected Thread reader = null;
     protected Exception ex = null;
     protected boolean connected = false;
@@ -816,18 +829,27 @@ public class SOCDisplaylessPlayerClient implements Runnable
      *<P>
      * If somehow the server isn't our version, print an error and disconnect.
      *
-     * @param isPractice Is the server local, or remote?  Client can be connected
+     * @param isLocal  Is the server local, or remote?  Client can be connected
      *                only to local, or remote.
-     * @param mes  the messsage
+     * @param mes  the message
      */
     private void handleVERSION(boolean isLocal, SOCVersion mes)
     {
         D.ebugPrintln("handleVERSION: " + mes);
         int vers = mes.getVersionNumber();
+        final SOCServerFeatures feats =
+            (vers >= SOCServerFeatures.VERSION_FOR_SERVERFEATURES)
+            ? new SOCServerFeatures(mes.localeOrFeats)
+            : new SOCServerFeatures(true);
+
         if (isLocal)
+        {
             sLocalVersion = vers;
-        else
+            sLocalFeatures = feats;
+        } else {
             sVersion = vers;
+            sFeatures = feats;
+        }
 
         final int ourVers = Version.versionNumber();
         if (vers != ourVers)
@@ -1302,7 +1324,7 @@ public class SOCDisplaylessPlayerClient implements Runnable
      * Handles ASK_SPECIAL_BUILD, NUM_PICK_GOLD_HEX_RESOURCES, SCENARIO_CLOTH_COUNT, etc.
      *<P>
      * To avoid code duplication, also called from
-     * {@link SOCPlayerClient#handlePLAYERELEMENT(SOCPlayerElement)}
+     * {@link SOCPlayerClient.MessageTreater#handlePLAYERELEMENT(SOCPlayerElement)}
      * and {@link soc.robot.SOCRobotBrain#run()}.
      *
      * @param mes  Message with amount and action (SET/GAIN/LOSE)
@@ -1376,7 +1398,7 @@ public class SOCDisplaylessPlayerClient implements Runnable
     /**
      * Update a player's amount of a playing piece, for {@link #handlePLAYERELEMENT(SOCPlayerElement)}.
      * To avoid code duplication, also called from
-     * {@link SOCPlayerClient#handlePLAYERELEMENT(SOCPlayerElement)}
+     * {@link SOCPlayerClient.MessageTreater#handlePLAYERELEMENT(SOCPlayerElement)}
      * and {@link soc.robot.SOCRobotBrain#run()}.
      *
      * @param mes       Message with amount and action (SET/GAIN/LOSE)
@@ -1409,7 +1431,7 @@ public class SOCDisplaylessPlayerClient implements Runnable
      * Update a player's amount of knights, and game's largest army,
      * for {@link #handlePLAYERELEMENT(SOCPlayerElement)}.
      * To avoid code duplication, also called from
-     * {@link SOCPlayerClient#handlePLAYERELEMENT(SOCPlayerElement)}
+     * {@link SOCPlayerClient.MessageTreater#handlePLAYERELEMENT(SOCPlayerElement)}
      * and {@link soc.robot.SOCRobotBrain#run()}.
      *
      * @param mes  Message with amount and action (SET/GAIN/LOSE)
@@ -1452,7 +1474,7 @@ public class SOCDisplaylessPlayerClient implements Runnable
      *</ul>
      *<P>
      * To avoid code duplication, also called from
-     * {@link SOCPlayerClient#handlePLAYERELEMENT(SOCPlayerElement)}
+     * {@link SOCPlayerClient.MessageTreater#handlePLAYERELEMENT(SOCPlayerElement)}
      * and {@link soc.robot.SOCRobotBrain#run()}.
      *
      * @param mes    Message with amount and action (SET/GAIN/LOSE)
@@ -1586,6 +1608,10 @@ public class SOCDisplaylessPlayerClient implements Runnable
                 ga.putPiece(new SOCCity(pl, coord, null));
                 break;
 
+            case SOCPlayingPiece.SHIP:
+                ga.putPiece(new SOCShip(pl, coord, null));
+                break;
+
             case SOCPlayingPiece.FORTRESS:
                 ga.putPiece(new SOCFortress(pl, coord, ga.getBoard()));
                 break;
@@ -1594,6 +1620,9 @@ public class SOCDisplaylessPlayerClient implements Runnable
                 ga.putPiece(new SOCVillage(coord, ga.getBoard()));
                 break;
 
+            default:
+                System.err.println
+                    ("Displayless.handlePUTPIECE: game " + ga.getName() + ": Unknown pieceType " + pieceType);
             }
         }
     }
@@ -1909,7 +1938,7 @@ public class SOCDisplaylessPlayerClient implements Runnable
             if ((pn == -1) || bl.getLegalAndPotentialSettlements().isEmpty())
                 bl.setLegalAndPotentialSettlements
                   (vset, mes.startingLandArea, las);  // throws IllegalStateException if board layout
-                                                      // has malformed Added Layout Part AL
+                                                      // has malformed Added Layout Part "AL"
             loneSettles = bl.getAddedLayoutPart("LS");  // usually null, except in _SC_PIRI
         } else {
             loneSettles = null;
@@ -1920,7 +1949,7 @@ public class SOCDisplaylessPlayerClient implements Runnable
             SOCPlayer player = ga.getPlayer(pn);
             player.setPotentialAndLegalSettlements(vset, true, las);
             if (loneSettles != null)
-                player.addLegalSettlement(loneSettles[pn]);
+                player.addLegalSettlement(loneSettles[pn], false);
             if (legalSeaEdges != null)
                 player.setRestrictedLegalShips(legalSeaEdges[0]);
         } else {
@@ -1929,7 +1958,7 @@ public class SOCDisplaylessPlayerClient implements Runnable
                 SOCPlayer pl = ga.getPlayer(pn);
                 pl.setPotentialAndLegalSettlements(vset, true, las);
                 if (loneSettles != null)
-                    pl.addLegalSettlement(loneSettles[pn]);
+                    pl.addLegalSettlement(loneSettles[pn], false);
                 if (legalSeaEdges != null)
                     pl.setRestrictedLegalShips(legalSeaEdges[pn]);
             }
@@ -2046,10 +2075,10 @@ public class SOCDisplaylessPlayerClient implements Runnable
 
     /**
      * Handle "simple action" announcements from the server.
-     * Currently a stub for SOCDisplaylessPlayerClient.
+     * Currently a stub in SOCDisplaylessPlayerClient.
      * @since 1.1.19
      */
-    private final void handleSIMPLEACTION(final SOCSimpleAction mes)
+    protected void handleSIMPLEACTION(final SOCSimpleAction mes)
     {
         /*
           code if not a stub:
@@ -2059,11 +2088,13 @@ public class SOCDisplaylessPlayerClient implements Runnable
         if (ga == null)
             return;  // Not one of our games
 
-        switch (mes.getActionType())
+        final int atype = mes.getActionType();
+        switch (atype)
         {
         default:
             // ignore unknown types
         }
+
         */
     }
 
@@ -2233,12 +2264,16 @@ public class SOCDisplaylessPlayerClient implements Runnable
                     item.setPlayer(pl);
                     item.setCoordinates(mes.coord);
                     item.setLevel(mes.level);
+                    item.setStringValue(mes.sv);
                 } else {
-                    item = new SOCSpecialItem(pl, mes.coord, mes.level, null, null);
+                    item = new SOCSpecialItem(pl, mes.coord, mes.level, mes.sv, null, null);
                 }
 
                 if (gi != -1)
+                {
+                    item.setGameIndex(gi);
                     ga.setSpecialItem(typeKey, gi, item);
+                }
 
                 if ((pi != -1) && (pl != null))
                     pl.setSpecialItem(typeKey, pi, item);
@@ -2348,6 +2383,42 @@ public class SOCDisplaylessPlayerClient implements Runnable
     public void moveRobber(SOCGame ga, SOCPlayer pl, int coord)
     {
         put(SOCMoveRobber.toCmd(ga.getName(), pl.getPlayerNumber(), coord));
+    }
+
+    /**
+     * Send a {@link SOCSimpleRequest} to the server.
+     * {@code reqType} gives the request type, and the optional
+     * {@code value1} and {@code value2} depend on request type.
+     *
+     * @param ga  the game
+     * @param ourPN  our player's player number
+     * @param reqType  Request type, such as {@link SOCSimpleRequest#SC_PIRI_FORT_ATTACK}.
+     *        See {@link SOCSimpleRequest} public int fields for possible types and their meanings.
+     * @param value1  First optional detail value, or 0
+     * @param value2  Second optional detail value, or 0
+     * @since 2.0.00
+     */
+    public void simpleRequest
+        (final SOCGame ga, final int ourPN, final int reqType, final int value1, final int value2)
+    {
+        put(SOCSimpleRequest.toCmd(ga.getName(), ourPN, reqType, value1, value2));
+    }
+
+    /**
+     * Send a request to pick a {@link SOCSpecialItem Special Item}, using a
+     * {@link SOCSetSpecialItem}{@code (PICK, typeKey, gi, pi, owner=-1, coord=-1, level=0)} message.
+     * @param ga  Game
+     * @param typeKey  Special item type.  Typically a {@link SOCGameOption} keyname; see the {@link SOCSpecialItem}
+     *     class javadoc for details.
+     * @param gi  Game Item Index, as in {@link SOCGame#getSpecialItem(String, int)} or
+     *     {@link SOCSpecialItem#playerPickItem(String, SOCGame, SOCPlayer, int, int)}, or -1
+     * @param pi  Player Item Index, as in {@link SOCSpecialItem#playerPickItem(String, SOCGame, SOCPlayer, int, int)},
+     *     or -1
+     * @since 2.0.00
+     */
+    public void pickSpecialItem(SOCGame ga, final String typeKey, final int gi, final int pi)
+    {
+        put(new SOCSetSpecialItem(ga.getName(), SOCSetSpecialItem.OP_PICK, typeKey, gi, pi, -1).toCmd());
     }
 
     /**

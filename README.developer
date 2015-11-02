@@ -1,4 +1,4 @@
-README.developer - Notes and current status of 2013 JSettlers development
+README.developer - Notes and current status of 2014 JSettlers development
 	(version 2.0.xx, beta server running at nand.net)
 	http://nand.net/jsettlers/devel/
 	http://sourceforge.net/projects/jsettlers2/
@@ -13,9 +13,12 @@ CONTENTS
 - Tips for debugging
 - Setup instructions for JSettlers as an Eclipse project
 	(although you may use any IDE you want)
+- Recommended debug/run configurations for testing
+- If you want to configure a sqlite database for testing
 - Build setup and results
 - Current partially-done work
 - Current TODO list
+- Developing with a database (JDBC)
 - Internationalization (I18N)
 - Robots (AI)
 - Coding Style
@@ -46,9 +49,13 @@ and the one-sentence summary (even though some old methods don't have that summa
 
 When submitting patches, please use unified diff (-ur) format.
 
-For more information about the AI, please see Robert S Thomas' dissertation.
+For more information about the AI, please see the "Robots (AI)" section
+and Robert S Thomas' dissertation.
+
 For more information about the board coordinates, see the dissertation appendix A,
 or javadocs in soc.game.SOCBoard, and src/docs/hexcoord.gif and hexcoord-6player.gif.
+To show piece coordinates in the board's tooltips, in the game window chat box type: =*= showcoords
+To no longer show those coordinates, type: =*= hidecoords
 
 The client's structure was refactored in 2.0 by Paul Bilnoski.  Paul's description of this work:
 Added two major new pieces of API: PlayerClientListener and GameDisplay. These are spliced between the
@@ -71,7 +78,9 @@ If you want to inspect the game object state at the server or robot:
 	Set a breakpoint at SOCServer.processDebugCommand, or at "case SOCMessage.GAMETEXTMSG"
 	  send a text msg from a client (the chat textfield), and inspect the game obj at that point
 	To inspect game state at robot, breakpoint robotcli.treat and send a text msg like *BOTLIST* or robot2:current-plans
-	On Linux/Unix JVMs, you can print a stack trace / thread dump to the shell by sending SIGQUIT.
+	On Linux/Unix JVMs, you can print a stack trace / thread dump at the server by sending SIGQUIT
+	  (kill -QUIT pidnumber). In deadlocks the thread dump won't show what has an object locked,
+	  but may show what's waiting on the object.
 
 Some game options are meant to be set by the server during game creation,
 not requested by the client.  Their option keynames all start with '_'.
@@ -104,12 +113,20 @@ the game setup routines to work properly during this debug mode.  The current
 player will be set to the first player (if 2+ settlements/roads placed) or the
 last player (1 settlement placed).
 
-If you want the robots to play a few games without any humans, use this flag on the
-command line when starting the server:
+In Eclipse, increase the console buffer size before long test runs, so you can
+scroll up to see the entire game's debug output.  Go to Eclipse Preferences ->
+Run/Debug -> Console, and either un-check "Limit console output", or set it to
+a size larger than the default 80000 characters.  Robots and network messages
+can create a lot of output, so can javadoc generation.
+
+If you want the robots to play a few games without any humans, set this
+property on the command line when starting the server:
 	-Djsettlers.bots.botgames.total=5
-As each game finishes, a new bot-only game will be started until 5 have been played.
-You can optionally use the client to observe a bot-only game.
-See the "Robots (AI)" section for details.
+As each game finishes, a new bot-only game will be started until 5 have been
+played. You can optionally use the client to observe a bot-only game. Also if
+jsettlers.bots.botgames.total != 0, at any time the client can create a new game
+and start it as bots-only using the debug command *STARTBOTGAME* [maxBots].
+See the "Robots (AI)" section for more details on bot testing.
 
 Setup instructions for JSettlers as an Eclipse project
 ------------------------------------------------------
@@ -136,7 +153,7 @@ from http://ant.apache.org/ .
 
 Check the "build.properties" file. There may be build variables you
 may want to change locally. These can also be changed from the command
-line if calling ant that way, by passing a "-Dname=value" parameter.
+line if calling ant that way, by passing a "-Dname=value" parameter to ant.
 
 There are several build targets, here are the most useful ones:
 
@@ -164,10 +181,10 @@ Java applet: soc.client.SOCPlayerClient$SOCApplet
 Java applications:
   cli-noargs  soc.client.SOCPlayerClient
   socserver   soc.server.SOCServer
-     arguments: -o NT=t -o PL=5 -Djsettlers.startrobots=7 -Djsettlers.client.maxcreategames=2
+     arguments: -o N7=t7 -o RD=y -Djsettlers.startrobots=7
                 -Djsettlers.allow.debug=Y 8880 20 dbuser dbpass
   socserver-sqlite  soc.server.SOCServer
-     arguments: -o NT=t -o NT=y -Djsettlers.db.url=jdbc:sqlite:jsettlers.sqlite  -Djsettlers.startrobots=7
+     arguments: -o N7=t7 -o RD=y -Djsettlers.db.url=jdbc:sqlite:jsettlers.sqlite  -Djsettlers.startrobots=7
                 -Djsettlers.allow.debug=Y 8880 20 dbuser dbpass
 
   The server will start 7 bots with the above configuration.  If you need to stop and start your
@@ -183,6 +200,7 @@ Java applications:
 If you want to configure a sqlite database for testing
 ------------------------------------------------------
   These instructions are written for Eclipse 3.6.
+  See also the "Developing with a database (JDBC)" section of this readme.
   JSettlers+sqlite works with standard Eclipse; the j2ee eclipse also has a convenient data browser.
   Note that README.txt mentions a command-line option -Djsettlers.db.jar=driverfile.jar ; that's
   needed only while running the jsettlers JAR from the command line, not running inside eclipse.
@@ -257,11 +275,6 @@ Current TODO list
 	- Control the speed of robots in practice games
 		Adjust SOCRobotBrain.pause, ROBOT_FORCE_ENDTURN_TRADEOFFER_SECONDS, etc
 	- Sound effects
-	- Property to require an account (user/password) in database in order to connect
-	- Properties for game option defaults for server startup
-		-Djsettlers.game.N7=y  instead of -O N7=y
-		allow lowercase too
-		probably best done at bottom of SOCServer.parseCmdline_DashedArgs
 	- Possible: Auto-add robots when needed as server runs, with server active-game count
 		only do it if jsettlers.startrobots property is set
 	- refactor: ga.getPlayer(ga.getCurrentPlayer()) or getClient().getClientManager()
@@ -279,13 +292,28 @@ Current TODO list
 	- Game "owner" with extra powers (kick out player, etc)
 		What happens if owner loses connection?
 	- Customize bot names (txt file or startup property) in srv.setupLocalRobots
-	- Server-side storage of options between runs (config file, sqlite db, etc)
 	- "Hot seat" mode (multiple human players sharing a screen on 1 client)
 	- Per-game thread/message queue at server (use SOCMessageForGame.getGame)
 	- Cities & Knights support
 		- UI mock-ups
 		- state change / network message plans
 		- robot support
+
+
+Developing with a database (JDBC)
+---------------------------------
+JSettlers can optionally use a database to store users and passwords, game score history,
+and robot parameters.  If databases interest you, the project welcomes contributions.
+Please keep these things in mind:
+
+- The DB is an optional part of jsettlers, other functions can't rely on it.
+- DB code should be vendor-neutral and run on mysql, postgres, sqlite, oracle, etc.
+  Please test against sqlite and at least one other db type before sending a pull request.
+- See README.txt for JDBC driver download sites, URL syntax, and server command-line arguments.
+- For test runs inside Eclipse, add the JDBC driver to the project's build path -> Libraries -> Add External JAR,
+  or add it to the classpath tab of SOCServer's eclipse Run Configuration; that option is
+  useful when testing against multiple database types.
+- See also the "If you want to configure a sqlite database for testing" section of this readme.
 
 
 Internationalization (I18N)
@@ -338,7 +366,8 @@ If you're interested in experimental changes to the jsettlers robots, or writing
 robot to connect to jsettlers, read this section.
 
 The project was originally started as Robert S Thomas' PhD dissertation about AI agents, so there's
-some instrumentation for the bots but it's not entirely documented.
+some instrumentation for the bots but it's not entirely documented.  For a technical overview of
+how the bots plan their actions, start at the SOCRobotBrain class javadoc.
 
 If you're looking to make minor changes, it's probably best to fork the soc.robot package and go
 from the classes and javadocs there.  For a larger change, some parts of soc.robot might still be
@@ -361,6 +390,10 @@ randomly choosing from 10 robot players, you could start the server with:
       -Djsettlers.startrobots=10 -Djsettlers.bots.botgames.total=7
 The robot-only games run at a quick pace, about 2 minutes for a 4-player game. You can use the
 jsettlers client to observe a bot game as it plays.
+
+If jsettlers.bots.botgames.total != 0 (including < 0), at any time the client can create a new game,
+join but not sit down at a seat, and start that game as bots-only using the debug command
+*STARTBOTGAME* [maxBots] to test the bots with any given combination of game options and scenarios.
 
 
 Coding Style
@@ -431,6 +464,8 @@ Here's how to set up the coding style in Eclipse:
 	displayed tab width: 8
 	[x] show print margin
 	print margin column: 120
+	[x] show whitespace characters
+		configure visibility -> trailing space, trailing ideographic space, trailing tab
 
 	project properties -> java compiler -> configure workspace settings
 	  compiler compliance level: 1.5
@@ -481,8 +516,8 @@ Here's how to set up the coding style in Eclipse:
 	    are configured on the formatter preference page.  The current indentation size
 	    is 4, using spaces."
 
-When you hit enter and insert a new line in Eclipse, watch the whitespace, it
-will add whitespace to the blank line to match the current indent.
+When you hit enter twice to skip a line in Eclipse, watch for unwanted whitespace because
+Eclipse will add whitespace to each blank line to match the current indent.
 
 If desired, in Eclipse preferences, you can bind a key combination to Remove Trailing Whitespace.
 This will trim it from the entire file when the key is pressed.
@@ -523,6 +558,6 @@ You can also see an overview of commit comments in the git log
 histories of src/java/resources/version.info.in and VERSIONS.txt.
 
 The github repo includes the full JSettlers2 CVS history formerly hosted at
-http://sourceforge.net/projects/jsettlers2/develop through 2012-09-28.
+http://sourceforge.net/projects/jsettlers2/ through 2012-09-28.
 The old old source history from Robert S Thomas (2004-2005) can be found at
-http://sourceforge.net/projects/jsettlers/develop .
+http://sourceforge.net/projects/jsettlers/ .

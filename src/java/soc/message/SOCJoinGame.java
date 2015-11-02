@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2009,2013 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2009,2013-2014 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -32,18 +32,24 @@ import java.util.StringTokenizer;
  *<P>
  * To request a new game with game options, send {@link SOCNewGameWithOptionsRequest NEWGAMEWITHOPTIONSREQUEST} instead.
  *<P>
+ * Once the client has successfully joined or created a game or channel, the
+ * password field can be left blank in later join/create requests.  All server
+ * versions ignore the password field after a successful request.
+ *<P>
  * Although this is a game-specific message, it's handled by {@code SOCServer} instead of a {@code GameHandler}.
  *
  * @author Robert S Thomas
  */
 public class SOCJoinGame extends SOCMessageTemplateJoinGame
 {
+    private static final long serialVersionUID = 1107L;  // last structural change v1.1.07
+
     /**
-     * Create a Join message.
+     * Create a Join Game message.
      *
      * @param nn  nickname
-     * @param pw  password
-     * @param hn  host name
+     * @param pw  optional password, or "" if none
+     * @param hn  server host name to which client is connecting
      * @param ga  name of the game
      */
     public SOCJoinGame(String nn, String pw, String hn, String ga)
@@ -65,8 +71,8 @@ public class SOCJoinGame extends SOCMessageTemplateJoinGame
      * JOINGAME sep nickname sep2 password sep2 host sep2 game
      *
      * @param nn  the nickname
-     * @param pw  the password
-     * @param hn  the host name
+     * @param pw  the optional password, or "" if none
+     * @param hn  the server host name to which client is connecting
      * @param ga  the game name
      * @return    the command string
      */
@@ -124,4 +130,5 @@ public class SOCJoinGame extends SOCMessageTemplateJoinGame
     {
         return super.toString("SOCJoinGame", null);
     }
+
 }

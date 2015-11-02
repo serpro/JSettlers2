@@ -2,7 +2,7 @@
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  *
  * This file Copyright (C) 2012-2013 Paul Bilnoski <paul@bilnoski.net>
- * Portions of this file Copyright (C) 2013-2014 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2013-2015 Jeremy D Monin <jeremy@nand.net>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -59,8 +59,8 @@ public interface PlayerClientListener
      * Receive a notification that the dice roll resulted in players gaining resources.
      * Call this after updating player resources with the gains.
      * Often follows a call to {@link #diceRolled(SOCPlayer, int)}.
-     * @param pnum  Player numbers, same format as {@link #playerNum}
-     * @param rsrc Resources gained by each {@code pn}, same format as {@link #playerRsrc}
+     * @param pnum  Player numbers, same format as {@link soc.message.SOCDiceResultResources#playerNum}
+     * @param rsrc Resources gained by each {@code pn}, same format as {@link soc.message.SOCDiceResultResources#playerRsrc}
      */
     void diceRolledResources(List<Integer> pnum, List<SOCResourceSet> rsrc);
 
@@ -102,7 +102,7 @@ public interface PlayerClientListener
 
     /**
      * A player has moved a piece on the board.
-     * Most pieces are not movable.  {@link SOCShip} can sometimes be moved.
+     * Most pieces are not movable.  {@link soc.game.SOCShip SOCShip} pieces can sometimes be moved.
      * Not used when the robber or pirate is moved; see {@link #robberMoved()}.
      * @param pieceType A piece type identifier, such as {@link SOCPlayingPiece#CITY}
      */
@@ -328,8 +328,8 @@ public interface PlayerClientListener
     /**
      * Client player's request to play a special {@link SOCInventoryItem} was rejected by the server.
      * @param type  Item type from {@link SOCInventoryItem#itype}
-     * @param reasonCode  Optional reason code for the {@link SOCInventoryItem#CANNOT_PLAY} action, corresponding
-     *            to {@link SOCGame#canPlayInventoryItem(int, int)} return codes, or 0
+     * @param reasonCode  Optional reason code for the {@link soc.message.SOCInventoryItemAction#CANNOT_PLAY} action,
+     *            corresponding to {@link SOCGame#canPlayInventoryItem(int, int)} return codes, or 0
      */
     void invItemPlayRejected(final int type, final int reasonCode);
 
@@ -345,18 +345,20 @@ public interface PlayerClientListener
      *
      * @param typeKey  Item's {@code typeKey}, as described in the {@link SOCSpecialItem} class javadoc
      * @param ga  Game containing {@code pl} and special items
-     * @param pl  Player who picked; never {@code null}
+     * @param pl  Player who picked: Never {@code null} when {@code isPick},
+     *                is {@code null} if server declined our player's request
      * @param gi  Picked this index within game's Special Item list, or -1
      * @param pi  Picked this index within {@code pl}'s Special Item list, or -1
      * @param isPick  True if calling for {@code PICK}, false if server has {@code DECLINE}d the client player's request
      * @param coord  Optional coordinates on the board for this item, or -1. An edge or a node, depending on item type
      * @param level  Optional level of construction or strength, or 0
+     * @param sv  Optional string value from {@link SOCSpecialItem#getStringValue()}, or {@code null}
      * @see #playerSetSpecialItem(String, SOCGame, SOCPlayer, int, int, boolean)
      * @see SOCSpecialItem#playerPickItem(String, SOCGame, SOCPlayer, int, int)
      */
     void playerPickSpecialItem
         (final String typeKey, final SOCGame ga, final SOCPlayer pl, final int gi, final int pi, final boolean isPick,
-         final int coord, final int level);
+         final int coord, final int level, final String sv);
 
     /**
      * Show the results of a player's {@code SET} or {@code CLEAR} of a known {@link SOCSpecialItem Special Item}.
@@ -370,7 +372,7 @@ public interface PlayerClientListener
      * @param gi  Set or clear this index within game's Special Item list, or -1
      * @param pi  Set or clear this index within {@code pl}'s Special Item list, or -1
      * @param isSet  True if player has set, false if player has cleared, this item index
-     * @see #playerPickSpecialItem(String, SOCGame, SOCPlayer, int, int)
+     * @see #playerPickSpecialItem(String, SOCGame, SOCPlayer, int, int, boolean, int, int, String)
      * @see SOCSpecialItem#playerSetItem(String, SOCGame, SOCPlayer, int, int, boolean)
      */
     void playerSetSpecialItem

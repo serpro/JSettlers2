@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2007-2013 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2014 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012 Paul Bilnoski <paul@bilnoski.net>
  *
  * This program is free software; you can redistribute it and/or
@@ -83,7 +83,7 @@ import java.util.Vector;
  *</TR>
  *<TR><td> Node </td>
  *    <td><!-- Node adjac to hex -->
- *      {@link #getAdjacentNodeToHex(int)} <br>
+ *      {@link #getAdjacentNodeToHex(int, int)} <br>
  *      {@link #getAdjacentNodesToHex(int)}
  *    </td>
  *    <td><!-- Node adjac to edge -->
@@ -161,7 +161,7 @@ import java.util.Vector;
  * For the large sea board (encoding v3: {@link #BOARD_ENCODING_LARGE}), see subclass {@link SOCBoardLarge}.
  * Remember that ship pieces extend the {@link SOCRoad} class.
  * Most methods of {@link SOCBoard}, {@link SOCGame} and {@link SOCPlayer} differentiate them
- * ({@link SOCPlayer#hasPotentialRoad() vs {@link SOCPlayer#hasPotentialShip()}),
+ * ({@link SOCPlayer#hasPotentialRoad()} vs {@link SOCPlayer#hasPotentialShip()}),
  * but a few methods group them together:
  *<UL>
  *<LI> {@link #roadAtEdge(int)}
@@ -175,6 +175,8 @@ import java.util.Vector;
  */
 public class SOCBoard implements Serializable, Cloneable
 {
+    private static final long serialVersionUID = 2000L;  // last structural change v2.0.00
+
     //
     // Hex types
     //
@@ -863,6 +865,7 @@ public class SOCBoard implements Serializable, Cloneable
      * @since 2.0.00
      * @throws IllegalArgumentException if <tt>boardEncodingFmt</tt> is out of range
      */
+    @SuppressWarnings("unchecked")
     protected SOCBoard(final int boardEncodingFmt, final int maxRobberHextype)
         throws IllegalArgumentException
     {
@@ -899,7 +902,7 @@ public class SOCBoard implements Serializable, Cloneable
      * @param gameOpts  if game has options, map of {@link SOCGameOption}; otherwise null.
      * @param maxPlayers Maximum players; must be 4 or 6. (Added in 1.1.08)
      * @throws IllegalArgumentException if <tt>maxPlayers</tt> is not 4 or 6
-     * @see #createBoard(Map, int)
+     * @see BoardFactory#createBoard(Map, boolean, int)
      */
     protected SOCBoard(Map<String,SOCGameOption> gameOpts, final int maxPlayers)
         throws IllegalArgumentException
@@ -2021,7 +2024,7 @@ public class SOCBoard implements Serializable, Cloneable
      *         in range {@link #MISC_PORT} to {@link #WOOD_PORT}.
      *         If called on a non-port hex, returns 0 
      *         (which is <tt>MISC_PORT</tt>).
-     * @param hex  the hex type, as in {@link #hexLayout}
+     * @param hexType  the hex type, as in {@link #hexLayout}
      * @see #getHexTypeFromCoord(int)
      * @see #getPortTypeFromNodeCoord(int)
      */
@@ -2300,13 +2303,14 @@ public class SOCBoard implements Serializable, Cloneable
     }
 
     /**
-     * put a piece on the board.
+     * Put a piece on the board.
      *<P>
      * Call this only after calling
-     * {@link SOCPlayer#putPiece(SOCPlayingPiece, boolean) pl.putPiece(pp)}
+     * {@link SOCPlayer#putPiece(SOCPlayingPiece, boolean) pl.putPiece(pp, isTempPiece)}
      * for each player.
      *
      * @param pp  Piece to place on the board; coordinates are not checked for validity
+     * @see #removePiece(SOCPlayingPiece)
      */
     public void putPiece(SOCPlayingPiece pp)
     {
@@ -2338,6 +2342,7 @@ public class SOCBoard implements Serializable, Cloneable
      * call this method first.
      * @param piece  Piece to be removed from the board
      *     (identified by its piece type, coordinate, and player number)
+     * @see #putPiece(SOCPlayingPiece)
      */
     public void removePiece(SOCPlayingPiece piece)
     {

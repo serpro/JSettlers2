@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * This file Copyright (C) 2009,2013 Jeremy D Monin <jeremy@nand.net>
+ * This file Copyright (C) 2009,2013-2014 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012 Paul Bilnoski <paul@bilnoski.net>
  *
  * This program is free software; you can redistribute it and/or
@@ -30,6 +30,10 @@ import soc.game.SOCGameOption;
  * needs same username/password options as {@link SOCJoinGame JOINGAME}.
  * Server's reply, if it can create the game, is a broadcast {@link SOCNewGameWithOptions}.
  *<P>
+ * Once the client has successfully joined or created a game or channel, the
+ * password field can be left blank in later join/create requests.  All server
+ * versions ignore the password field after a successful request.
+ *<P>
  * Introduced in 1.1.07; check server version against {@link SOCNewGameWithOptions#VERSION_FOR_NEWGAMEWITHOPTIONS}
  * before sending this message.  Older servers should be given {@link SOCJoinGame JOINGAME} instead.
  *<P>
@@ -41,11 +45,13 @@ import soc.game.SOCGameOption;
  * Robot clients don't need to know about or handle this message type,
  * because they don't create games.
  *
- * @author Jeremy D Monin <jeremy@nand.net>
+ * @author Jeremy D Monin &lt;jeremy@nand.net&gt;
  * @since 1.1.07
  */
 public class SOCNewGameWithOptionsRequest extends SOCMessageTemplateJoinGame
 {
+    private static final long serialVersionUID = 2000L;  // last structural change v2.0.00
+
     /** won't be null, even if opts is null, due to {@link SOCGameOption#packOptionsToString(Map, boolean)} format. */
     private String optsStr;
 
@@ -56,8 +62,8 @@ public class SOCNewGameWithOptionsRequest extends SOCMessageTemplateJoinGame
      * Create a NewGameWithOptionsRequest message.
      *
      * @param nn  nickname
-     * @param pw  password
-     * @param hn  host name
+     * @param pw  optional password, or "" if none
+     * @param hn  server host name
      * @param ga  name of the game
      * @param opts the game options, or null;
      *           if null, it probably makes sense to create
@@ -72,11 +78,11 @@ public class SOCNewGameWithOptionsRequest extends SOCMessageTemplateJoinGame
     }
 
     /**
-     * Create a NEWGameWithOptionsRequest message.
+     * Create a NewGameWithOptionsRequest message.
      *
      * @param nn  nickname
-     * @param pw  password
-     * @param hn  host name
+     * @param pw  optional password, or "" if none
+     * @param hn  server host name
      * @param ga  name of the game
      * @param optstr the game options as a string name-value pairs, as created by
      *             {@link SOCGameOption#packOptionsToString(Map, boolean)}.
@@ -112,8 +118,8 @@ public class SOCNewGameWithOptionsRequest extends SOCMessageTemplateJoinGame
      * NEWGAMEWITHOPTIONSREQUEST sep nickname sep2 password sep2 host sep2 game sep2 options
      *
      * @param nn  the nickname
-     * @param pw  the password
-     * @param hn  the host name
+     * @param pw  the optional password, or "" if none
+     * @param hn  the server host name
      * @param ga  the game name
      * @param optstr the game options as a string name-value pairs, as created by
      *             {@link SOCGameOption#packOptionsToString(Map, boolean)}.
@@ -130,6 +136,12 @@ public class SOCNewGameWithOptionsRequest extends SOCMessageTemplateJoinGame
     }
 
     /**
+     * NEWGAMEWITHOPTIONSREQUEST sep nickname sep2 password sep2 host sep2 game sep2 options
+     *
+     * @param nn  the nickname
+     * @param pw  the optional password, or "" if none
+     * @param hn  the server host name
+     * @param ga  the game name
      * @param opts the game options ({@link SOCGameOption})
      * @return    the command string
      */
@@ -193,4 +205,5 @@ public class SOCNewGameWithOptionsRequest extends SOCMessageTemplateJoinGame
     {
         return super.toString("SOCNewGameWithOptionsRequest", "opts=" + optsStr);
     }
+
 }

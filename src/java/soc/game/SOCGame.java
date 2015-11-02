@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2007-2014 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012 Skylar Bolton <iiagrer@gmail.com>
  * Portions of this file Copyright (C) 2012 Paul Bilnoski <paul@bilnoski.net>
  *
@@ -89,6 +89,12 @@ import java.util.Vector;
  */
 public class SOCGame implements Serializable, Cloneable
 {
+    /**
+     * The main game class has a serialVersionUID; pieces and players don't.
+     * Currently we don't expect to persist a game between versions.
+     */
+    private static final long serialVersionUID = 2000L;  // Last structural change in v2.0.00
+
     /**
      * Game states.  {@link #NEW} is a brand-new game, not yet ready to start playing.
      * Players are choosing where to sit, or have all sat but no one has yet clicked
@@ -289,7 +295,8 @@ public class SOCGame implements Serializable, Cloneable
      * Player is placing the pirate ship on a new water hex,
      * in a game which {@link #hasSeaBoard}.
      * May follow state {@link #WAITING_FOR_ROBBER_OR_PIRATE}.
-     * Next game state may be {@link #WAITING_FOR_ROB_CLOTH_OR_RESOURCE}.
+     * Next game state may be {@link #WAITING_FOR_ROB_CHOOSE_PLAYER} if multiple possible victims.
+     * In scenario {@link SOCGameOption#K_SC_CLVI _SC_CLVI}, next may be {@link #WAITING_FOR_ROB_CLOTH_OR_RESOURCE}.
      * @see #PLACING_ROBBER
      * @see #canMovePirate(int, int)
      * @see #movePirate(int, int)
@@ -331,7 +338,7 @@ public class SOCGame implements Serializable, Cloneable
     public static final int PLACING_INV_ITEM = 42;
 
     /**
-     * Waiting for player(s) to discard, after 7 is rolled.
+     * Waiting for player(s) to discard, after 7 is rolled in {@link #rollDice()}.
      * Next game state is {@link #WAITING_FOR_DISCARDS}
      * (if other players still need to discard),
      * {@link #WAITING_FOR_ROBBER_OR_PIRATE},
@@ -388,10 +395,12 @@ public class SOCGame implements Serializable, Cloneable
     public static final int WAITING_FOR_MONOPOLY = 53;
 
     /**
-     * Waiting for player to choose the robber or the pirate ship.
+     * Waiting for player to choose the robber or the pirate ship,
+     * after {@link #rollDice()} or {@link #playKnight()}.
      * Next game state is {@link #PLACING_ROBBER} or {@link #PLACING_PIRATE}.
      * @see #canChooseMovePirate()
      * @see #chooseMovePirate(boolean)
+     * @see #WAITING_FOR_DISCARDS
      * @since 2.0.00
      */
     public static final int WAITING_FOR_ROBBER_OR_PIRATE = 54;
@@ -596,6 +605,12 @@ public class SOCGame implements Serializable, Cloneable
     public static SOCBoard.BoardFactory boardFactory;
 
     /**
+     * An empty int array for use in method calls.
+     * @since 2.0.00
+     */
+    private static final int[] EMPTY_INT_ARRAY = { };
+
+    /**
      * monitor for synchronization
      */
     boolean inUse;
@@ -627,6 +642,8 @@ public class SOCGame implements Serializable, Cloneable
      * the server handler for those actions checks this list afterwards, to send before GAMESTATE.
      *<P>
      * Because this is server-only, it's null until {@link #startGame()}.
+     * To send and clear this list's contents, the server should call
+     * {@code SOCGameHandler.sendGamePendingMessages(SOCGame, boolean)}.
      * @since 2.0.00
      */
     public transient List<Object> pendingMessagesOut;
@@ -730,6 +747,7 @@ public class SOCGame implements Serializable, Cloneable
      * For use at server; lowest version of client which can connect to
      * this game (based on game options/features added in a given version),
      * or -1 if unknown.
+     *<P>
      * Calculated by {@link SOCVersionedItem#itemsMinimumVersion(Map)}.
      * Format is the internal integer format, see {@link soc.util.Version#versionNumber()}.
      * Value may sometimes be too low at client, see {@link #getClientVersionMinRequired()} for details.
@@ -853,10 +871,13 @@ public class SOCGame implements Serializable, Cloneable
      * Is this game played on the {@link SOCBoardLarge} large board / sea board?
      * If true, our board's {@link SOCBoard#getBoardEncodingFormat()}
      * must be {@link SOCBoard#BOARD_ENCODING_LARGE}.
-     * When <tt>hasSeaBoard</tt>, {@link #getBoard()} can be cast to {@link SOCBoardLarge}.
+     * When {@code hasSeaBoard}, {@link #getBoard()} can always be cast to {@link SOCBoardLarge}.
      *<P>
-     * The 6-player extensions ({@link #maxPlayers} == 6) are orthogonal to <tt>hasSeaBoard</tt>
+     * The 6-player extensions ({@link #maxPlayers} == 6) are orthogonal to {@code hasSeaBoard}
      * or other board types/expansions; one doesn't imply or exclude the other.
+     *<P>
+     * In most scenarios the sea board has a pirate ship that can be moved instead of
+     * the robber.  See game states {@link #WAITING_FOR_ROBBER_OR_PIRATE} and {@link #PLACING_PIRATE}.
      * @since 2.0.00
      */
     public final boolean hasSeaBoard;
@@ -891,6 +912,7 @@ public class SOCGame implements Serializable, Cloneable
     /**
      * The saved game state; used in only a few places, where a state can happen from different start states.
      * Not set every time the game state changes.
+     *<P>
      * oldGameState is read in these states:
      *<UL>
      *<LI> {@link #STARTS_WAITING_FOR_PICK_GOLD_RESOURCE}:
@@ -913,7 +935,7 @@ public class SOCGame implements Serializable, Cloneable
      *        After picking gold from a dice roll, this will usually be {@link #PLAY1}.
      *        Sometimes will be {@link #PLACING_FREE_ROAD2} or {@link #SPECIAL_BUILDING}.
      *</UL>
-     * Also used if the game board was reset, {@link #getResetOldGameState()} holds the state before the reset.
+     * Also used if the game board was reset: {@link #getResetOldGameState()} holds the state before the reset.
      */
     private int oldGameState;
 
@@ -1002,6 +1024,10 @@ public class SOCGame implements Serializable, Cloneable
      * This is not the union of each player's {@code spItems}, but a separately maintained Map of item lists.
      * See getter/setter javadocs for details on type keys and rationale for lack of synchronization.
      * ArrayList is used to guarantee we can store null items.
+     *<P>
+     * Initialized at server and client in {@link #updateAtBoardLayout()} using
+     * {@link SOCSpecialItem#makeKnownItem(String, int)}.
+     *
      * @since 2.0.00
      */
     private HashMap<String, ArrayList<SOCSpecialItem>> spItems;
@@ -1121,12 +1147,13 @@ public class SOCGame implements Serializable, Cloneable
 
     /**
      * create a new, active game with options
+     * and optionally a scenario (game option {@code "SC"}).
      *
      * @param n  the name of the game.  For network message safety, must not contain
      *           control characters, {@link SOCMessage#sep_char}, or {@link SOCMessage#sep2_char}.
      *           This is enforced by calling {@link SOCMessage#isSingleLineAndSafe(String)}.
      * @param op if game has options, map of {@link SOCGameOption}; otherwise null.
-     *           Will validate options by calling
+     *           Will validate options and include optional scenario's {@link SOCScenario#scOpts} by calling
      *           {@link SOCGameOption#adjustOptionsToKnown(Map, Map, boolean)}
      *           with <tt>doServerPreadjust</tt> false,
      *           and set game's minimum version by calling
@@ -1159,13 +1186,14 @@ public class SOCGame implements Serializable, Cloneable
 
     /**
      * create a new game that can be ACTIVE or INACTIVE, and have options
+     * and optionally a scenario (game option {@code "SC"}).
      *
      * @param n  the name of the game.  For network message safety, must not contain
      *           control characters, {@link SOCMessage#sep_char}, or {@link SOCMessage#sep2_char}.
      *           This is enforced by calling {@link SOCMessage#isSingleLineAndSafe(String)}.
      * @param isActive  true if this is an active game, false for inactive
      * @param op if game has options, map of {@link SOCGameOption}; otherwise null.
-     *           Will validate options by calling
+     *           Will validate options and include optional scenario's {@link SOCScenario#scOpts} by calling
      *           {@link SOCGameOption#adjustOptionsToKnown(Map, Map, boolean)}
      *           with <tt>doServerPreadjust</tt> false,
      *           and set game's minimum version by calling
@@ -1251,7 +1279,7 @@ public class SOCGame implements Serializable, Cloneable
         {
             clientVersionMinRequired = -1;
         } else {
-            final StringBuffer optProblems = SOCGameOption.adjustOptionsToKnown(op, null, false);
+            final StringBuilder optProblems = SOCGameOption.adjustOptionsToKnown(op, null, false);
             if (optProblems != null)
                 throw new IllegalArgumentException("op: unknown option(s): " + optProblems);
 
@@ -1383,7 +1411,7 @@ public class SOCGame implements Serializable, Cloneable
      * For games at the server, the owner (creator) of the game.
      * Will be the name of a player / server connection.
      * Even if the owner leaves the game, their name may be retained here.
-     * @return the owner's player name, or null if {@link #setOwner(String)} was never called
+     * @return the owner's player name, or null if {@link #setOwner(String, String)} was never called
      * @since 1.1.10
      * @see #getOwnerLocale()
      */
@@ -1586,8 +1614,10 @@ public class SOCGame implements Serializable, Cloneable
      * @return the player object for a player id; never null if pn is in range
      *
      * @param pn  the player number, in range 0 to {@link #maxPlayers}-1
+     * @throws ArrayIndexOutOfBoundsException if {@code pn} is out of range
      */
     public SOCPlayer getPlayer(final int pn)
+        throws ArrayIndexOutOfBoundsException
     {
         return players[pn];
     }
@@ -1823,7 +1853,7 @@ public class SOCGame implements Serializable, Cloneable
     /**
      * For use at server; lowest version of client which can connect to
      * this game (based on game options/features added in a given version),
-     * or -1 if unknown or if this game has no opts.
+     * or -1 if unknown or if this game has no options.
      * Calculated by {@link SOCVersionedItem#itemsMinimumVersion(Map)}.
      *<P>
      * For options where the minimum version changes with its current value, some
@@ -1833,7 +1863,7 @@ public class SOCGame implements Serializable, Cloneable
      * will let the client know if it's too old to join or create a game due
      * to options.
      *
-     * @return game version, in same integer format as {@link soc.util.Version#versionNumber()}.
+     * @return game version, in same format as {@link soc.util.Version#versionNumber()}.
      * @since 1.1.06
      */
     public int getClientVersionMinRequired()
@@ -1851,7 +1881,7 @@ public class SOCGame implements Serializable, Cloneable
 
     /**
      * Get the game board.
-     * When {@link #hasSeaBoard}, <tt>getBoard()</tt> can be cast to {@link SOCBoardLarge}.
+     * When {@link #hasSeaBoard}, {@code getBoard()} can always be cast to {@link SOCBoardLarge}.
      * @return the game board
      */
     public SOCBoard getBoard()
@@ -1930,7 +1960,11 @@ public class SOCGame implements Serializable, Cloneable
     /**
      * Has any player built a city?
      * Used with house-rule {@link SOCGameOption game option} {@code "N7C"}.
-     * @return  True if {@link #putPiece}({@link SOCCity}) has been called
+     *<P>
+     * No setter is needed: During normal game play, {@link #putPiece(SOCPlayingPiece) putPiece(SOCCity)} will
+     * update this flag. If a client joins a game after it's started, the server will send PUTPIECE messages
+     * for any cities already on the board.
+     * @return  True if {@link #putPiece}({@link SOCCity}) has been called for a non-temporary piece
      * @since 1.1.19
      */
     public boolean hasBuiltCity()
@@ -2569,10 +2603,10 @@ public class SOCGame implements Serializable, Cloneable
      * If a {@link SOCBoard#WATER_HEX} is revealed, updates players' legal ship edges.
      *
      * @param hexCoord  Coordinate of the hex to reveal
-     * @param hexType   Revealed hex type, same value as {@link #getHexTypeFromCoord(int)},
+     * @param hexType   Revealed hex type, same value as {@link SOCBoard#getHexTypeFromCoord(int)},
      *                    from {@link SOCBoardLarge#revealFogHiddenHexPrep(int)}
-     * @param diceNum   Revealed hex dice number, same value as {@link #getNumberOnHexFromCoord(int)}, or 0
-     * @throws IllegalArgumentException if <tt>hexCoord</tt> isn't currently a {@link #FOG_HEX}
+     * @param diceNum   Revealed hex dice number, same value as {@link SOCBoard#getNumberOnHexFromCoord(int)}, or 0
+     * @throws IllegalArgumentException if <tt>hexCoord</tt> isn't currently a {@link SOCBoardLarge#FOG_HEX FOG_HEX}
      * @throws IllegalStateException if <tt>! game.{@link #hasSeaBoard}</tt>
      * @since 2.0.00
      */
@@ -2630,8 +2664,8 @@ public class SOCGame implements Serializable, Cloneable
     }
 
     /**
-     * At server: For scenario option {@link SOCGameOption#K_SC_FTRI _SC_FTRI}, remove a "gift" port
-     * at this edge for placement elsewhere. Assumes {@link #canRemovePort(int)} has already
+     * For scenario option {@link SOCGameOption#K_SC_FTRI _SC_FTRI}, remove a "gift" port
+     * at this edge for placement elsewhere. Assumes {@link #canRemovePort(SOCPlayer, int)} has already
      * been called to validate player, edge, and game state.
      *<P>
      * This method will remove the port from the board.  At server it will also add it to the
@@ -2639,7 +2673,9 @@ public class SOCGame implements Serializable, Cloneable
      * it immediately; and then fire {@link SOCScenarioPlayerEvent#REMOVED_TRADE_PORT}.
      *<P>
      * <b>At the server:</b> Not called directly; called only from other game/player methods.
-     * Ports are currently removed only by player ship placements.
+     * Ports are currently removed only by player ship placements, so
+     * {@link SOCPlayer#putPiece(SOCPlayingPiece, boolean)} would eventually call this
+     * method if {@code canRemovePort(..)}.
      *<P>
      * In the PlayerEvent handler or after this method returns, check
      * {@link #getGameState()} == {@link #PLACING_INV_ITEM} to see whether the port must immediately
@@ -2714,7 +2750,7 @@ public class SOCGame implements Serializable, Cloneable
      *             meet all conditions for {@code canPlacePort}.
      * @return  True if a port can be placed at this edge
      * @throws NullPointerException if {@code pl} is null
-     * @see #canRemovePort(int)
+     * @see #canRemovePort(SOCPlayer, int)
      * @see #placePort(SOCPlayer, int, int)
      * @since 2.0.00
      */
@@ -3528,7 +3564,7 @@ public class SOCGame implements Serializable, Cloneable
      * @param pn   Player number
      * @param fromEdge  Edge coordinate to move the ship from; must contain this player's ship
      * @return  The ship, if the player can move the ship now; null otherwise
-     * @see canMoveShip(int, int, int)
+     * @see #canMoveShip(int, int, int)
      * @since 2.0.00
      */
     public SOCShip canMoveShip(final int pn, final int fromEdge)
@@ -3614,7 +3650,7 @@ public class SOCGame implements Serializable, Cloneable
      * Calls {@link #checkForWinner()}; gamestate may become {@link #OVER}
      * if a player gets the longest trade route.
      *<P>
-     * Calls {@link #undoPutPieceCommon(SOCPlayingPiece) undoPutPieceCommon(sh, false)}
+     * Calls {@link #undoPutPieceCommon(SOCPlayingPiece, boolean) undoPutPieceCommon(sh, false)}
      * and {@link #putPiece(SOCPlayingPiece)}.
      * Updates longest trade route.
      * Not for use with temporary pieces.
@@ -3653,7 +3689,7 @@ public class SOCGame implements Serializable, Cloneable
      * Used in scenario option {@link SOCGameOption#K_SC_PIRI _SC_PIRI}
      * by {@link #attackPirateFortress(SOCShip)} and at the client.
      *<P>
-     * Calls {@link #undoPutPieceCommon(SOCPlayingPiece) undoPutPieceCommon(sh, false)}.
+     * Calls {@link #undoPutPieceCommon(SOCPlayingPiece, boolean) undoPutPieceCommon(sh, false)}.
      * Not for use with temporary pieces.
      *
      * @param sh  the ship to remove
@@ -3755,11 +3791,11 @@ public class SOCGame implements Serializable, Cloneable
 
     /**
      * do the things involved in starting a game:
-     * shuffle the tiles and cards,
-     * make a board,
+     * shuffle the tiles and cards, make a board,
      * set players' legal and potential piece locations,
      * choose first player.
      * gameState becomes {@link #START1A}.
+     * Updates {@link #lastActionTime}.
      *<P>
      * Called only at server, not client.  For a method called during game start
      * at server and clients, see {@link #updateAtBoardLayout()}.
@@ -3797,6 +3833,9 @@ public class SOCGame implements Serializable, Cloneable
                 players[i].setPotentialAndLegalSettlements(psList, true, las);
         }
         updateAtBoardLayout();
+
+        // make sure game doesn't look idle, in case first player is a robot
+        lastActionTime = System.currentTimeMillis();
 
         allOriginalPlayers = true;
         gameState = START1A;
@@ -4071,14 +4110,16 @@ public class SOCGame implements Serializable, Cloneable
      * Update game state as needed after initial placement before the first turn of normal play:
      *<UL>
      *<LI> Call each player's {@link SOCPlayer#clearPotentialSettlements()}
-     *<LI> If {@link #hasSeaBoard}, check board for Added Layout Part {@code AL} for node lists that
+     *<LI> If {@link #hasSeaBoard}, check board for Added Layout Part {@code "AL"} for node lists that
      *     become legal locations for settlements after initial placement, and make them legal now.
      *     (This Added Layout Part is rarely used, currently is in scenario {@link SOCScenario#K_SC_WOND SC_WOND}.)
+     *     If any node has an adjacent settlement or city, that node won't be made legal.
      *    <P>
      *     Calls {@link SOCBoardLarge#addLegalNodes(int[], int)} for each referenced node list.
      *     Does not adjust players' potential settlement locations, because at the start of a game,
      *     players won't have roads to any node 2 away from their settlements, so they will have no
-     *     new potential settlements yet.  Does call players' {@link SOCPlayer#addLegalSettlement(int)}.
+     *     new potential settlements yet.  Does call each player's
+     *     {@link SOCPlayer#addLegalSettlement(int, boolean) pl.addLegalSettlement(coord, true)}.
      *</UL>
      *<P>
      * Called at server and client by {@link #advanceTurnStateAfterPutPiece()}, before {@link #updateAtTurn()}.
@@ -4098,11 +4139,12 @@ public class SOCGame implements Serializable, Cloneable
             (board instanceof SOCBoardLarge) ? ((SOCBoardLarge) board).getAddedLayoutPart("AL") : null;
         if (partAL != null)
         {
-            // Look through board's Added Layout Part AL for node list numbers:
-            // Part AL was already strictly parsed in SOCBoardLarge.initLegalRoadsFromLandNodes(),
+            // Look through board's Added Layout Part "AL" for node list numbers:
+            // Part "AL" was already strictly parsed in SOCBoardLarge.initLegalRoadsFromLandNodes(),
             // so there shouldn't be any problems in it. Ignore problems here instead of throwing exceptions.
             // If you update the "AL" parser here, update the similar one there too.
 
+            boolean emptiedAnyNodeSet = false;
             for (int i = 0; i < partAL.length; ++i)
             {
                 final int elem = partAL[i];
@@ -4110,7 +4152,15 @@ public class SOCGame implements Serializable, Cloneable
                     continue;  // ignore unless it's a node list number
 
                 ++i;
-                final int lan = partAL[i];  // land area number follows elem
+                int lan = partAL[i];  // land area number follows elem
+                final boolean doEmptyNodeSet;
+                if (lan < 0)
+                {
+                    doEmptyNodeSet = true;
+                    lan = -lan;
+                } else {
+                    doEmptyNodeSet = false;
+                }
 
                 final String nodeListKey = "N" + elem;
                 final int[] nodeList = ((SOCBoardLarge) board).getAddedLayoutPart(nodeListKey);
@@ -4121,8 +4171,18 @@ public class SOCGame implements Serializable, Cloneable
 
                 for (int j = 0; j < nodeList.length; ++j)
                     for (int pn = maxPlayers - 1; pn >= 0; --pn)
-                        players[pn].addLegalSettlement(nodeList[j]);
+                        players[pn].addLegalSettlement(nodeList[j], true);
+
+                if (doEmptyNodeSet)
+                {
+                    emptiedAnyNodeSet = true;
+                    ((SOCBoardLarge) board).setAddedLayoutPart(nodeListKey, EMPTY_INT_ARRAY);
+                }
             }
+
+            if (emptiedAnyNodeSet && (scenarioEventListener != null))
+                scenarioEventListener.gameEvent
+                    (this, SOCScenarioGameEvent.SGE_STARTPLAY_BOARD_SPECIAL_NODES_EMPTIED, null);
         }
     }
 
@@ -4219,8 +4279,8 @@ public class SOCGame implements Serializable, Cloneable
      * Exceptions (where caller should not call endTurn) are these return types:
      * <UL>
      * <LI> {@link SOCForceEndTurnResult#FORCE_ENDTURN_RSRC_DISCARD_WAIT}
-     *       - Have forced current player to discard randomly, must now
-     *         wait for other players to discard.
+     *       - Have forced current player to discard or gain resources randomly,
+     *         must now wait for other players to pick their discards or gains.
      *         gameState is {@link #WAITING_FOR_DISCARDS}, current player
      *         as yet unchanged.
      * <LI> {@link SOCForceEndTurnResult#FORCE_ENDTURN_SKIP_START_ADV}
@@ -4269,6 +4329,9 @@ public class SOCGame implements Serializable, Cloneable
 
         forcingEndTurn = true;
         SOCInventoryItem itemCard = null;  // card/inventory item returned to player, if any
+
+        if (gameState == WAITING_FOR_ROBBER_OR_PIRATE)
+            chooseMovePirate(false);  // gameState becomes PLACING_ROBBER, which is in the switch
 
         switch (gameState)
         {
@@ -4556,10 +4619,10 @@ public class SOCGame implements Serializable, Cloneable
      *
      * @param pn Player number to force to randomly discard or gain
      * @param isDiscard  True to discard resources, false to gain
-     * @return The force result, including any discarded resources.
+     * @return The force result, including any discarded or gained resources.
      *         Type will be {@link SOCForceEndTurnResult#FORCE_ENDTURN_RSRC_DISCARD}
      *         or {@link SOCForceEndTurnResult#FORCE_ENDTURN_RSRC_DISCARD_WAIT}.
-     * @see #playerDiscardRandom(int, boolean)
+     * @see #playerDiscardOrGainRandom(int, boolean)
      */
     private SOCForceEndTurnResult forceEndTurnChkDiscardOrGain(final int pn, final boolean isDiscard)
     {
@@ -4573,9 +4636,6 @@ public class SOCGame implements Serializable, Cloneable
         } else {
             discardOrGainPickRandom(hand, players[pn].getNeedToPickGoldHexResources(), false, picks, rand);
             pickGoldHexResources(pn, picks);  // Checks for other players, sets gameState
-            // TODO - what if not waiting for current pl to pick gains, but other pl?
-            //   (discard could be same scenario)
-            // TODO return type; ones below are for discards
         }
 
         if ((gameState == WAITING_FOR_DISCARDS) || (gameState == WAITING_FOR_PICK_GOLD_RESOURCE))
@@ -4595,8 +4655,8 @@ public class SOCGame implements Serializable, Cloneable
      * For discards, randomly choose from contents of <tt>fromHand</tt>.
      * For gains, randomly choose resource types least plentiful in <tt>fromHand</tt>.
      *
-     * @param fromHand     Discard from this set
-     * @param numToPick    This many must be discarded or added
+     * @param fromHand     Discard from this set, or gain to add to this set
+     * @param numToPick    This many must be discarded or gained
      * @param isDiscard    True to discard resources, false to gain
      * @param picks        Add the picked resources to this set (typically new and empty when called)
      * @param rand         Source of random
@@ -4695,16 +4755,20 @@ public class SOCGame implements Serializable, Cloneable
     }
 
     /**
-     * Force this non-current player to discard randomly.  Used at server when a
-     * player must discard and they lose connection while the game is waiting for them.
+     * Force this non-current player to discard or gain resources randomly.
+     * Used at server when a player must discard or pick free resources
+     * and player loses connection while the game is waiting for them,
+     * or a bot is unresponsive.
      *<P>
      * On return, gameState will be:
      *<UL>
      * <LI> {@link #WAITING_FOR_DISCARDS} if other players still must discard
-     * <LI> {@link #WAITING_FOR_PICK_GOLD_RESOURCE} if other players stll must pick their resources
+     * <LI> {@link #WAITING_FOR_PICK_GOLD_RESOURCE} if other players still must pick their resources
+     * <LI> {@link #PLAY1} if everyone has picked (gained) resources
      * <LI> {@link #PLAY1} if everyone has discarded, and {@link #isForcingEndTurn()} is set
      * <LI> {@link #PLACING_ROBBER} if everyone has discarded, and {@link #isForcingEndTurn()} is not set
      *</UL>
+     * Before v2.0.00, this method was {@code playerDiscardRandom(..)}.
      *
      * @param pn Player number to discard; player must must need to discard,
      *           must not be current player (use {@link #forceEndTurn()} for that)
@@ -4716,7 +4780,7 @@ public class SOCGame implements Serializable, Cloneable
      *                                  and their {@link SOCPlayer#getNeedToPickGoldHexResources()} == 0,
      *                               or if pn == currentPlayer.
      */
-    public SOCResourceSet playerDiscardRandom(final int pn, final boolean isDiscard)
+    public SOCResourceSet playerDiscardOrGainRandom(final int pn, final boolean isDiscard)
         throws IllegalStateException
     {
         if (pn == currentPlayerNumber)
@@ -4755,10 +4819,13 @@ public class SOCGame implements Serializable, Cloneable
     /**
      * roll the dice.  Distribute resources, or (for 7) set gamestate to
      * move robber or to wait for players to discard.
-     * gameState becomes either {@link #WAITING_FOR_DISCARDS},
+     * {@link #getGameState()} will usually become {@link #PLAY1}.
+     * If the board contains gold hexes, it may become {@link #WAITING_FOR_PICK_GOLD_RESOURCE}.
+     * For 7, gameState becomes either {@link #WAITING_FOR_DISCARDS},
      * {@link #WAITING_FOR_ROBBER_OR_PIRATE}, or {@link #PLACING_ROBBER}.
      *<br>
      * Checks game option N7: Roll no 7s during first # rounds
+     * and N7C: Roll no 7s until a city is built.
      *<P>
      * For scenario option {@link SOCGameOption#K_SC_CLVI}, calls
      * {@link SOCBoardLarge#distributeClothFromRoll(SOCGame, int)}.
@@ -5178,6 +5245,8 @@ public class SOCGame implements Serializable, Cloneable
                 gameState = PLAY1;
             }
         }
+
+        lastActionTime = System.currentTimeMillis();
     }
 
     /**
@@ -5234,6 +5303,7 @@ public class SOCGame implements Serializable, Cloneable
     {
         players[pn].getResources().add(rs);
         players[pn].setNeedToPickGoldHexResources(0);
+        lastActionTime = System.currentTimeMillis();
 
         // initial placement?
         if (gameState == STARTS_WAITING_FOR_PICK_GOLD_RESOURCE)
@@ -5277,8 +5347,14 @@ public class SOCGame implements Serializable, Cloneable
     /**
      * Based on game options, can the pirate ship be moved instead of the robber?
      * True only if {@link #hasSeaBoard}.
-     * For scenario option {@link SOCGameOption#K_SC_CLVI _SC_CLVI}, the player
+     *<UL>
+     *<LI> For scenario option {@link SOCGameOption#K_SC_CLVI _SC_CLVI}, the player
      * must have {@link SOCScenarioPlayerEvent#CLOTH_TRADE_ESTABLISHED_VILLAGE}.
+     *<LI> Scenario option {@link SOCGameOption#K_SC_PIRI _SC_PIRI} has a pirate fleet
+     * and no robber; this scenario is checked in {@link #rollDice()} and does not call
+     * {@code canChooseMovePirate()}.
+     *<LI> Scenario option {@link SOCGameOption#K_SC_WOND _SC_WOND} does not use the pirate ship.
+     *</UL>
      * @return  true if the pirate ship can be moved
      * @see #WAITING_FOR_ROBBER_OR_PIRATE
      * @see #chooseMovePirate(boolean)
@@ -5288,6 +5364,10 @@ public class SOCGame implements Serializable, Cloneable
     {
         if (! hasSeaBoard)
             return false;
+
+        if (isGameOptionSet(SOCGameOption.K_SC_WOND))
+            return false;
+
         if (isGameOptionSet(SOCGameOption.K_SC_CLVI)
             && ! players[currentPlayerNumber].hasScenarioPlayerEvent
                  (SOCScenarioPlayerEvent.CLOTH_TRADE_ESTABLISHED_VILLAGE))
@@ -5301,6 +5381,9 @@ public class SOCGame implements Serializable, Cloneable
      * {@link #WAITING_FOR_ROBBER_OR_PIRATE}.
      * Game state becomes {@link #PLACING_ROBBER} or {@link #PLACING_PIRATE}.
      * {@link #getRobberyPirateFlag()} is set or cleared accordingly.
+     *<P>
+     * Called from server's game handler and also from {@link #forceEndTurn()} if necessary.
+     *
      * @param pirateNotRobber  True to move pirate, false to move robber
      * @throws IllegalStateException if gameState != {@link #WAITING_FOR_ROBBER_OR_PIRATE}
      * @since 2.0.00
@@ -6118,7 +6201,7 @@ public class SOCGame implements Serializable, Cloneable
      *                    if player has 0 {@link SOCPlayer#getResources() resources}.
      * @return the type of resource that was stolen, as in {@link SOCResourceConstants},
      *         or {@link SOCResourceConstants#CLOTH_STOLEN_LOCAL} for cloth.
-     * @see #stealFromPlayerPirateFleet(int)
+     * @see #stealFromPlayerPirateFleet(int, int)
      */
     public int stealFromPlayer(final int pn, boolean choseCloth)
     {
@@ -7115,7 +7198,7 @@ public class SOCGame implements Serializable, Cloneable
      *     <LI> or any other nonzero scenario-specific detail code for why the item can't be played now
      *   </UL>
      * @since 2.0.00
-     * @see #playInventoryItem()
+     * @see #playInventoryItem(int)
      */
     public int canPlayInventoryItem(final int pn, final int itype)
     {
@@ -7481,7 +7564,7 @@ public class SOCGame implements Serializable, Cloneable
 
     /**
      * check current player's vp total to see if the
-     * game is over.  If so, Set game state to {@link #OVER},
+     * game is over.  If so, set game state to {@link #OVER},
      * set player with win.
      *<P>
      * This method is called from other game methods which may award VPs or may cause a win,

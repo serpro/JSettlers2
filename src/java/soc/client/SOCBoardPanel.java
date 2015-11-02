@@ -1,7 +1,7 @@
 /**
  * Java Settlers - An online multiplayer version of the game Settlers of Catan
  * Copyright (C) 2003  Robert S. Thomas <thomas@infolab.northwestern.edu>
- * Portions of this file Copyright (C) 2007-2014 Jeremy D Monin <jeremy@nand.net>
+ * Portions of this file Copyright (C) 2007-2015 Jeremy D Monin <jeremy@nand.net>
  * Portions of this file Copyright (C) 2012-2013 Paul Bilnoski <paul@bilnoski.net>
  *
  * This program is free software; you can redistribute it and/or
@@ -76,6 +76,8 @@ import java.util.Timer;
  * It loads gifs from a directory named "images" in the same
  * directory as this class.
  * The board background color is set in {@link SOCPlayerInterface}.
+ * If {@link SOCGame#hasSeaBoard} is true for this board, all areas
+ * outside the board boundaries will be filled with sea hex tiles.
  *<P>
  * When the mouse is over the game board, a tooltip shows information
  * such as a hex's resource, a piece's owner, a port's ratio, or the
@@ -176,7 +178,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
     /**
      * x-offset to move over 1 hex, for each port facing direction (1-6). 0 is unused.
      * Facing is the direction to the land hex touching the port.
-     * Facing 1 is NE, 2 is E, 3 is SE, 4 is SW, etc: see {@link SOCBoard#hexLayout}.
+     * Facing 1 is NE, 2 is E, 3 is SE, 4 is SW, etc: see {@link SOCBoard#FACING_E} etc.
      * @see #DELTAY_FACING
      * @since 1.1.08
      */
@@ -412,7 +414,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
 
     /**
      * Place an initial settlement, or just hover at a port.
-     * @see #hoverIsPort
+     * @see SOCBoardPanel.BoardToolTip#hoverIsPort
      */
     private final static int PLACE_INIT_SETTLEMENT = 5;
 
@@ -665,6 +667,16 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
     private long drawnEmptyAt;
 
     /**
+     * Debugging flag where board item tooltip includes the item's coordinates.
+     * When set, the coordinates become part of the hoverText string.
+     * Set or cleared with {@link #setDebugShowCoordsFlag(boolean)}, from
+     * SOCPlayerInterface debug command {@code =*= showcoords} or {@code =*= hidecoords}.
+     * @see BoardToolTip#setHoverText(String, int)
+     * @since 2.0.00
+     */
+    private boolean debugShowCoordsTooltip = false;
+
+    /**
      * For debugging, flags to show player 0's potential/legal coordinate sets.
      * The drawing happens in {@link #drawBoardEmpty(Graphics)}.
      *<P>
@@ -685,7 +697,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
      * Changed via {@link #setDebugShowPotentialsFlag(int, boolean, boolean)} with
      * SOCPlayerInterface debug command {@code =*= show: n} or {@code =*= hide: n}.
      *<P>
-     * Has package-level visibility, for use by {@link SOCPlayerInterface#updateAtPutPiece(SOCPlayingPiece)}.
+     * Has package-level visibility, for use by {@link SOCPlayerInterface#updateAtPutPiece(int, int, int, boolean, int)}.
      * @since 2.0.00
      */
     boolean[] debugShowPotentials;
@@ -752,7 +764,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
     /**
      * Port images - shared unscaled original-resolution from {@link #IMAGEDIR}'s GIF files.
      * Image references are copied to {@link #scaledPorts} from here.
-     * Contains the 6 per-direction port overlays.
+     * Contains the 6 per-facing port overlays.
      * {@code miscPort.gif} is in {@link #hexes} along with the land hex images used for 2:1 ports.
      * For indexes, see {@link #loadHexesPortsImages(Image[], Image[], String, MediaTracker, Toolkit, Class, boolean)}.
      * @see #hexes
@@ -972,11 +984,24 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
     /**
      * During {@link #MOVE_SHIP} mode, the edge coordinate
      * from which we're moving the ship.  0 otherwise.
-     * The hovering "move-to" location under the mouse pointer is {@link #hilight}.
+     * The hovering "move-to" location under the mouse pointer is {@link #hilight}
+     * and then (at left-click to select destination, or right-click to show the menu)
+     * is {@link #moveShip_toEdge}.
      * @see #moveShip_isWarship
      * @since 2.0.00
      */
     private int moveShip_fromEdge;
+
+    /**
+     * During {@link #MOVE_SHIP} mode, the edge coordinate to which we're
+     * moving the ship, 0 otherwise.  While choosing a location to move to,
+     * the hovering ship under the mouse pointer is {@link #hilight}, but
+     * when the menu appears (on Windows at least) hilight becomes 0.
+     * @see #tryMoveShipToEdge()
+     * @see #moveShip_fromEdge
+     * @since 2.0.00
+     */
+    private int moveShip_toEdge;
 
     /**
      * During {@link #MOVE_SHIP} mode, true if the ship being moved
@@ -1905,7 +1930,10 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
         }
         else if (piece instanceof SOCVillage)
         {
-            // no update needed; village cloth count is handled in tooltip hover
+            // If village cloth count becomes 0, redraw it in gray.
+            // Otherwise no update needed, village cloth count is handled in tooltip hover.
+            if (((SOCVillage) piece).getCloth() == 0)
+                flushBoardLayoutAndRepaint();
         }
         else
         {
@@ -2231,6 +2259,24 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
             for (int i = yorig.length - 1; i >= 0; --i)
                 xr[i] = (int) ((xr[i] * (long) scaledPanelX) / panelMinBW);
         return xr;
+    }
+
+    /**
+     * Set or clear the debug flag where the board item tooltip includes the item's coordinates.
+     * Takes effect the next time the mouse moves.
+     * @see BoardToolTip#setHoverText(String, int)
+     * @param setOn
+     * @since 2.0.00
+     */
+    void setDebugShowCoordsFlag(final boolean setOn)
+    {
+        if (setOn == debugShowCoordsTooltip)
+            return;
+
+        debugShowCoordsTooltip = setOn;
+
+        // no immediate repaint, because we don't know the coordinate (on)
+        // and the coordinate string is part of the text (off).
     }
 
     /**
@@ -2609,7 +2655,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
      * Draw the robber.
      *<P>
      * The pirate ship (if any) is drawn via
-     * {@link #drawRoadOrShip(Graphics, int, int, boolean, boolean)}.
+     * {@link #drawRoadOrShip(Graphics, int, int, boolean, boolean, boolean)}.
      *
      * @param g       Graphics context
      * @param hexID   Board hex encoded position
@@ -3060,15 +3106,21 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
 
     /**
      * Draw a cloth trade village (used in some scenarios in the large sea board).
-     * Same logic for determining (x,y) from nodeNum as {@link #drawSettlementOrCity(Graphics, int, int, boolean, boolean)}.
+     * Villages are drawn yellow unless {@link SOCVillage#getCloth() v.getCloth()}
+     * is depleted to 0, those are light gray to show how close the game is to
+     * an end-game condition.
+     *<P>
+     * Same logic for determining (x,y) from {@link SOCPlayingPiece#getCoordinates() v.getCoordinates()}
+     * node as {@link #drawSettlementOrCity(Graphics, int, int, boolean, boolean, boolean)}.
      * @param v  Village
      * @since 2.0.00
      */
     private void drawVillage(Graphics g, final SOCVillage v)
     {
+        final Color vc = (v.getCloth() > 0) ? Color.YELLOW : Color.LIGHT_GRAY;
         final int[] nodexy = nodeToXY(v.getCoordinates());
 
-        drawMarker(g, nodexy[0], nodexy[1], Color.YELLOW, v.diceNum);
+        drawMarker(g, nodexy[0], nodexy[1], vc, v.diceNum);
    }
 
     /**
@@ -3709,6 +3761,22 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
         // drawHex will set scaledMissedImage if missed.
         if (! isLargeBoard)
         {
+            // Draw water hexes to all edges of the panel;
+            // these are outside the board coordinate system.
+
+            boolean isRowOffset = isRotated;
+            for (int hy = -deltaY; hy < panelMinBH; hy += deltaY, isRowOffset = ! isRowOffset)
+            {
+                // TODO When scaled, any other offset around edges? See convert/unscale methods
+
+                int hx = 0;
+                if (isRowOffset)
+                    hx -= halfdeltaX;
+                for (; hx < panelMinBW; hx += deltaX)
+                    if (0 == findHex(hx, hy))
+                        drawHex(g, hx, hy, SOCBoard.WATER_HEX, -1, -1);
+            }
+
             // Normal board draws all 37 hexes.
             // The 6-player board skips the rightmost row (hexes 7D-DD-D7).
 
@@ -3729,9 +3797,19 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
             // (r,c) are board coordinates.
             // (x,y) are pixel coordinates.
 
-            final int bw = board.getBoardWidth();
+            // Top border ("row -1"): Easier to draw it separately than deal with row coord -1 in main loop.
+            // The initial x-coord formula aligns just enough water hexes to cover -panelMarginX.
+            for (int x = -(deltaX * ((panelMarginX + deltaX - 1) / deltaX));
+                 x < (scaledPanelX - panelMarginX);
+                 x += deltaX)
+            {
+                drawHex(g, x, -halfdeltaY, SOCBoard.WATER_HEX, -1, -1);
+            }
+
+            // In-bounds board hexes and bottom border:
+            final int bw = board.getBoardWidth(), bh = board.getBoardHeight();
             for (int r = 1, y = halfdeltaY;
-                 r < board.getBoardHeight();
+                 r < bh || y < (scaledPanelY + HEXY_OFF_SLOPE_HEIGHT);
                  r += 2, y += deltaY)
             {
                 final int rshift = (r << 8);
@@ -3745,23 +3823,19 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                     x = halfdeltaX;
                 }
 
-                if (panelMarginX != 0)
+                if ((panelMarginX != 0) || (x != 0))
                 {
-                    // If board is narrow and has left margin, fill in with water
-                    int xleft = x, cleft = c;
-                    while (xleft >= -panelMarginX)  // xleft >= 0 after g.translate
-                    {
-                        final int hexCoord = rshift | cleft;
-                        drawHex(g, xleft, y, SOCBoard.WATER_HEX, -1, hexCoord);
-                        cleft -= 2;
-                        xleft -= deltaX;
-                    }
+                    // If board is narrow or row doesn't start at left side of panel, fill border with water.
+                    // xleft drawn at >= 0 after g.translate for panelMarginX
+                    for (int xleft = x; xleft > -(panelMarginX + deltaX); xleft -= deltaX)
+                        drawHex(g, xleft, y, SOCBoard.WATER_HEX, -1, -1);
                 }
 
                 for (; c < bw; c += 2, x += deltaX)
                 {
                     final int hexCoord = rshift | c;
-                    drawHex(g, x, y, board.getHexTypeFromCoord(hexCoord), -1, hexCoord);
+                    final int hexType = (r < bh) ? board.getHexTypeFromCoord(hexCoord) : SOCBoard.WATER_HEX;
+                    drawHex(g, x, y, hexType, -1, hexCoord);
                     if ((landHexShow != null) && landHexShow.contains(new Integer(hexCoord)))
                     {
                        g.setColor(Color.RED);
@@ -4586,6 +4660,12 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                                     // "{0} rounds left for "No 7s""
                         }
                     }
+                    if ((topText == null) && (! game.hasBuiltCity())
+                        && playerInterface.getClientHand().isClientAndCurrentlyCanRoll()  // prevent end-of-turn flicker
+                        && game.isGameOptionSet("N7C"))
+                    {
+                        topText = strings.get("board.msg.n7c.until_city");  // "No 7s rolled until a city is built"
+                    }
                     break;
 
                 case SOCGame.SPECIAL_BUILDING:
@@ -4630,9 +4710,9 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
     }
 
     /**
-     * Update {@link #hoverTip} based on {@link #mode}.
-     * Might or might not repaint board:
-     * Calls {@link BoardToolTip#setOffsetX(int)} or {@link BoardToolTip#setHoverText(String)}.
+     * Update {@link #hoverTip} based on {@link #mode} when it changes;
+     * called from {@link #updateMode()}. Might or might not repaint board:
+     * Calls {@link BoardToolTip#setOffsetX(int)} or {@link BoardToolTip#setHoverText(String, int)}.
      */
     protected void updateHoverTipToMode()
     {
@@ -4641,11 +4721,13 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
         else if ((mode == PLACE_ROBBER) || (mode == PLACE_PIRATE))
             hoverTip.setOffsetX(HOVER_OFFSET_X_FOR_ROBBER);
         else if ((mode == PLACE_INIT_SETTLEMENT) || (mode == PLACE_INIT_ROAD))
-            hoverTip.setOffsetX(HOVER_OFFSET_X_FOR_INIT_PLACE);
-        else
         {
             hoverTip.setHoverText_modeChangedOrMouseMoved = true;
-            hoverTip.setHoverText(null);
+            hoverTip.setHoverText(null, 0);
+            hoverTip.setOffsetX(HOVER_OFFSET_X_FOR_INIT_PLACE);
+        } else {
+            hoverTip.setHoverText_modeChangedOrMouseMoved = true;
+            hoverTip.setHoverText(null, 0);
         }
     }
 
@@ -4909,7 +4991,13 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                     {
                         hilight = edgeNum;
                         hilightIsShip = isShip;
-                        repaint();
+                        if (debugShowCoordsTooltip)
+                        {
+                            String blank = (edgeNum != 0) ? "" : null;    // "" shows tip, null hides it.
+                            hoverTip.setHoverText(blank, edgeNum, x, y);  // also repaints
+                        } else {
+                            repaint();
+                        }
                     }
                 }
 
@@ -4983,7 +5071,13 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                     {
                         hilight = edgeNum;
                         hilightIsShip = isShip;
-                        repaint();
+                        if (debugShowCoordsTooltip)
+                        {
+                            String blank = (edgeNum != 0) ? "" : null;    // "" shows tip, null hides it.
+                            hoverTip.setHoverText(blank, edgeNum, x, y);  // also repaints
+                        } else {
+                            repaint();
+                        }
                     }
                 }
 
@@ -5010,13 +5104,20 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                     {
                         hilight = nodeNum;
                         hilightIsShip = false;
-                        if (mode == PLACE_INIT_SETTLEMENT)
+                        if ((mode == PLACE_INIT_SETTLEMENT) && ! debugShowCoordsTooltip)
                             hoverTip.handleHover(x,y);
-                        repaint();
+                        else if (debugShowCoordsTooltip)
+                            hoverTip.setHoverText
+                                (((nodeNum != 0) ? "" : null), nodeNum, x, y);
+                        else
+                            repaint();
                     }
                     else if (mode == PLACE_INIT_SETTLEMENT)
                     {
-                        hoverTip.handleHover(x,y);  // Will call repaint() if needed
+                        if (debugShowCoordsTooltip && (nodeNum != 0))
+                            hoverTip.setHoverText("", nodeNum, x, y);
+                        else
+                            hoverTip.handleHover(x,y);  // Will call repaint() if needed
                     }
                 }
 
@@ -5042,7 +5143,13 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                     {
                         hilight = nodeNum;
                         hilightIsShip = false;
-                        repaint();
+                        if (debugShowCoordsTooltip)
+                        {
+                            String blank = (nodeNum != 0) ? "" : null;    // "" shows tip, null hides it.
+                            hoverTip.setHoverText(blank, nodeNum, x, y);  // also repaints
+                        } else {
+                            repaint();
+                        }
                     }
                 }
 
@@ -5070,7 +5177,13 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                     {
                         hilight = edgeNum;
                         hilightIsShip = true;
-                        repaint();
+                        if (debugShowCoordsTooltip)
+                        {
+                            String blank = (edgeNum != 0) ? "" : null;    // "" shows tip, null hides it.
+                            hoverTip.setHoverText(blank, edgeNum, x, y);  // also repaints
+                        } else {
+                            repaint();
+                        }
                     }
                 }
 
@@ -5101,9 +5214,10 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                                 && ((SOCBoardLarge) board).isHexInLandAreas
                                     (hexNum, ((SOCBoardLarge) board).getRobberExcludedLandAreas()))
                             {
-                                hoverTip.setHoverText(strings.get("board.robber.not.here"));  // "Cannot move the robber here."
+                                hoverTip.setHoverText(strings.get("board.robber.not.here"), hexNum);
+                                    // "Cannot move the robber here."
                             } else {
-                                hoverTip.setHoverText(null);  // clear any previous
+                                hoverTip.setHoverText(null, 0);  // clear any previous
                             }
 
                             hexNum = 0;
@@ -5158,7 +5272,13 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                 if (edgeNum != hilight)
                 {
                     hilight = edgeNum;
-                    repaint();  // clear previous, or set new hilight
+                    if (debugShowCoordsTooltip)
+                    {
+                        String blank = (edgeNum != 0) ? "" : null;    // "" shows tip, null hides it.
+                        hoverTip.setHoverText(blank, edgeNum, x, y);  // also repaints
+                    } else {
+                        repaint();
+                    }
                 }
                 break;
 
@@ -5367,8 +5487,10 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                     break;
 
                 case MOVE_SHIP:
-                    // check and move ship to hilight from fromEdge; also sets moveShip_fromEdge = 0, calls clearModeAndHilight.
-                    tryMoveShipToHilight();
+                    // check and move ship to hilight from fromEdge;
+                    // also sets moveShip_fromEdge = 0, calls clearModeAndHilight.
+                    moveShip_toEdge = hilight;
+                    tryMoveShipToEdge();
                     break;
 
                 case PLACE_INIT_SETTLEMENT:
@@ -5688,7 +5810,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
     }
 
     /**
-     * player decided to not build something, so cancel the {@link TimerTask}
+     * player decided to not build something, so cancel the {@link java.util.TimerTask}
      * that's waiting to tell the server what they wanted to build.
      * @since 1.1.00
      */
@@ -5721,33 +5843,36 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
     }
 
     /**
-     * Check and move ship from {@link #moveShip_fromEdge} to {@link #hilight}.  Also sets moveShip_fromEdge = 0,
+     * Check and move ship from {@link #moveShip_fromEdge} to {@link #moveShip_toEdge}.
+     * Also sets {@code moveShip_fromEdge} = 0, {@code moveShip_toEdge} = 0,
      * calls {@link #clearModeAndHilight(int) clearModeAndHilight}({@link SOCPlayingPiece#SHIP}).
      * Called from mouse click or popup menu.
      *<P>
-     * Note that if {@link #hilight} != 0, then {@link SOCGame#canMoveShip(int, int, int) SOCGame.canMoveShip}
-     * ({@link #playerNumber}, {@link #moveShip_fromEdge}, {@link #hilight}) has probably already been called.
+     * Note that if {@code moveShip_toEdge} != 0, then {@link SOCGame#canMoveShip(int, int, int) SOCGame.canMoveShip}
+     * ({@link #playerNumber}, {@link #moveShip_fromEdge}, {@link #moveShip_toEdge}) has probably already been called.
      *<P>
      * In scenario {@link SOCGameOption#K_SC_FTRI _SC_FTRI}, checks if a gift port would be claimed by
      * placing a ship there.  If so, confirms with the user first with {@link ConfirmPlaceShipDialog}.
      * @since 2.0.00
      * @see BoardPopupMenu#tryMoveShipFromHere()
      */
-    private final void tryMoveShipToHilight()
+    private final void tryMoveShipToEdge()
     {
         boolean clearMode = true;
 
         if (moveShip_fromEdge != 0)
         {
-            if (game.canMoveShip(playerNumber, moveShip_fromEdge, hilight) != null)
+            if (game.canMoveShip(playerNumber, moveShip_fromEdge, moveShip_toEdge) != null)
             {
-                if (game.isGameOptionSet(SOCGameOption.K_SC_FTRI) && ((SOCBoardLarge) board).canRemovePort(hilight))
+                if (game.isGameOptionSet
+                    (SOCGameOption.K_SC_FTRI) && ((SOCBoardLarge) board).canRemovePort(moveShip_toEdge))
                 {
-                    java.awt.EventQueue.invokeLater(new ConfirmPlaceShipDialog(hilight, false, moveShip_fromEdge));
+                    java.awt.EventQueue.invokeLater
+                        (new ConfirmPlaceShipDialog(moveShip_toEdge, false, moveShip_fromEdge));
                     clearMode = false;
                 } else {
                     playerInterface.getClient().getGameManager().movePieceRequest
-                        (game, playerNumber, SOCPlayingPiece.SHIP, moveShip_fromEdge, hilight);
+                        (game, playerNumber, SOCPlayingPiece.SHIP, moveShip_fromEdge, moveShip_toEdge);
                 }
             }
 
@@ -6038,7 +6163,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
      *
      * @see #updateMode()
      * @see #setModeMoveShip(int)
-     * @see SOCPlayerClient#doLocalCommand(SOCGame, String)
+     * @see SOCPlayerInterface#doLocalCommand(String)
      */
     public void setMode(int m)
     {
@@ -6052,6 +6177,8 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
      * Repaints the board immediately.
      * @param edge  Edge coordinate of our player's ship we're moving.
      *              Not checked for validity.
+     * @see #tryMoveShipToEdge()
+     * @since 2.0.00
      */
     public void setModeMoveShip(final int edge)
     {
@@ -6059,6 +6186,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
             throw new IllegalStateException();
         mode = MOVE_SHIP;
         moveShip_fromEdge = edge;
+        moveShip_toEdge = 0;
         hilight = 0;
         repaint();
     }
@@ -6363,7 +6491,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
         private int mouseX, mouseY;
 
         /**
-         * Flag to tell {@link #setHoverText(String)} to repaint, even if text hasn't changed.
+         * Flag to tell {@link #setHoverText(String, int)} to repaint, even if text hasn't changed.
          * @since 1.1.17
          */
         private boolean setHoverText_modeChangedOrMouseMoved;
@@ -6427,7 +6555,8 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
          * Repaint the board.
          * @param x x-coordinate of mouse, actual screen pixels (not unscaled internal)
          * @param y y-coordinate of mouse, actual screen pixels (not unscaled internal)
-         * @see #setHoverText(String)
+         * @see #setHoverText(String, int)
+         * @see #setHoverText(String, int, int, int)
          */
         public void positionToMouse(final int x, int y)
         {
@@ -6479,10 +6608,22 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
          * @param t Hover text contents, or null to clear that text (but
          *          not hovering pieces) and repaint.  Do nothing if text is
          *          already equal to <tt>t</tt>, or if both are null.
+         * @param coord  Cursor's board coordinates shown when "show coordinates" debug flag is set, or -1.
+         *          Ignored if {@code t} is {@code null}.  To show only the coordinate, use "" for {@code t}.
+         * @see #setHoverText(String, int, int, int)
          * @see #hideHoverAndPieces()
+         * @see SOCBoardPanel#setDebugShowCoordsFlag(boolean)
          */
-        public void setHoverText(final String t)
+        public void setHoverText(String t, final int coord)
         {
+            if ((t != null) && (coord >= 0) && debugShowCoordsTooltip)
+            {
+                if (t.length() > 0)
+                    t += " - 0x" + Integer.toHexString(coord);
+                else
+                    t = "0x" + Integer.toHexString(coord);
+            }
+
             // If text unchanged, and mouse hasn't moved, do nothing:
             if ( (t == hoverText)  // (also covers both == null)
                  || ((t != null) && t.equals(hoverText)) )
@@ -6501,6 +6642,28 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
 
             boxW = 0;  // Paint method will calculate it
             positionToMouse(mouseX, mouseY);  // Also calls repaint, clears setHoverText_modeChangedOrMouseMoved
+        }
+
+        /**
+         * Set tooltip text (or hide tooltip if text is null) and show tooltip at appropriate location
+         * when mouse is at (x,y) relative to the board. Repaint the board.
+         *<P>
+         * Convenience method, calls {@link #positionToMouse(int, int)} and {@link #setHoverText(String, int)}. 
+         *
+         * @param t Hover text contents, or null to clear that text (but
+         *          not hovering pieces) and repaint.  Do nothing if text is
+         *          already equal to {@code t}, or if both are null.
+         * @param coord  Cursor's board coordinates shown when "show coordinates" debug flag is set, or -1.
+         *          Ignored if {@code t} is {@code null}.  To show only the coordinate, use "" for {@code t}.
+         * @param x x-coordinate of mouse, actual screen pixels (not unscaled internal)
+         * @param y y-coordinate of mouse, actual screen pixels (not unscaled internal)
+         * @since 2.0.00
+         */
+        public void setHoverText(final String t, final int coord, final int x, final int y)
+        {
+            // TODO don't repaint twice
+            positionToMouse(x, y);
+            setHoverText(t, coord);
         }
 
         /**
@@ -6606,8 +6769,8 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
          *<LI> If not over a settlement, look for a road or ship
          *<LI> If no road, look for a hex
          *<LI> If no piece currently at the point, look for potential pieces and
-         *     scenario-specific items such as Villages, the Pirate Path (Added Layout Part {@code PP}),
-         *     and members of Special Node lists ({@code N1 - N3}).
+         *     scenario-specific items such as Villages, the Pirate Path (Added Layout Part {@code "PP"}),
+         *     and members of Special Node lists ({@code "N1" - "N3"}).
          *</UL>
          *
          * @param x Cursor x, from upper-left of board: actual coordinates, not board-internal coordinates
@@ -6656,6 +6819,12 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                 (player != null) && (debugPP || playerInterface.clientIsCurrentPlayer());
             boolean hoverTextSet = false;  // True once text is determined
 
+            /** If we're hovering at a node port, store its coordinate here and also set {@link #nodePortType} */
+            int nodePortCoord = -1;
+
+            /** Node port type, from board.getPortTypeFromNodeCoord, for hoverText if nothing more important nearby */
+            int nodePortType = -1;
+
             if (! modeAllowsHoverPieces)
             {
                 hoverRoadID = 0;
@@ -6683,6 +6852,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                 }
 
                 // Is anything there?
+                // Check for settlements, cities, ports, fortresses:
                 SOCPlayingPiece p = board.settlementAtNode(id);
                 if (p == null)
                     p = game.getFortress(id);  // pirate fortress (scenario option _SC_PIRI) or null
@@ -6720,7 +6890,9 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                         sb.setLength(0);
                         sb.append("board.sc_piri.piratefortress");
                     }
-                    setHoverText(strings.get(sb.toString(), plName, board.getPortTypeFromNodeCoord(id)));
+
+                    setHoverText
+                        (strings.get(sb.toString(), plName, board.getPortTypeFromNodeCoord(id)), id);
                     hoverTextSet = true;
 
                     // If we're at the player's settlement, ready to upgrade to city
@@ -6755,7 +6927,8 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                             hoverIsPort = false;
                             hoverTextSet = true;
                             hoverCityID = 0;
-                            setHoverText(strings.get("board.sc_clvi.village", vi.diceNum, vi.getCloth()));
+                            setHoverText
+                                (strings.get("board.sc_clvi.village", vi.diceNum, vi.getCloth()), id);
                                 // "Village for cloth trade on {0} ({1} cloth)"
                         }
                     }
@@ -6774,7 +6947,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                             }
                             else if (player.isPotentialSettlement(id))
                             {
-                                setHoverText(strings.get("board.settle.not.here"));  // "Not allowed to settle here"
+                                setHoverText(strings.get("board.settle.not.here"), id);  // "Not allowed to settle here"
                                 hoverMode = PLACE_ROBBER;  // const used for hovering-at-node
                                 hoverID = id;
                                 hoverIsPort = false;
@@ -6817,7 +6990,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
 
                         if (htext != null)
                         {
-                            setHoverText(strings.get(htext));
+                            setHoverText(strings.get(htext), id);
                             hoverMode = PLACE_ROBBER;  // const used for hovering-at-node
                             hoverID = id;
                             hoverIsPort = false;
@@ -6825,23 +6998,17 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                         }
                     }
 
-                    // Port check.  At most one adjacent will be a port.
-                    if ((hoverMode == PLACE_INIT_SETTLEMENT) && (hoverID == id))
+                    if (! hoverTextSet)
                     {
-                        // Already looking at a port at this coordinate.
-                        positionToMouse(x,y);
-                        hoverTextSet = true;
-                    }
-                    else if (! hoverTextSet)
-                    {
-                        String portDesc = portDescAtNode(id);
-                        if (portDesc != null)
+                        // Check for ports. Show only if nothing else is nearby.
+
+                        nodePortType = board.getPortTypeFromNodeCoord(id);
+                        if (nodePortType != -1)
                         {
-                            setHoverText(strings.get(portDesc, board.getPortTypeFromNodeCoord(id)));
-                            hoverTextSet = true;
-                            hoverMode = PLACE_INIT_SETTLEMENT;  // const used for hovering-at-port
-                            hoverID = id;
-                            hoverIsPort = true;
+                            // Make note of port info, will show it only if nothing more important is
+                            // found nearby. This prevents the port from "covering up" pieces on adjacent
+                            // edges that the user may want to click on.
+                            nodePortCoord = id;
                         }
                     }
 
@@ -6876,7 +7043,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
 
                                     if (nlDesc != null)
                                     {
-                                        setHoverText(nlDesc);
+                                        setHoverText(nlDesc, id);
                                         hoverMode = PLACE_ROBBER;  // const used for hovering-at-node
                                         hoverID = id;
                                         hoverIsPort = false;
@@ -6931,14 +7098,14 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
 
                         if (isRoad)
                         {
-                            setHoverText(strings.get("board.road", plName));  // "Road: " + plName
+                            setHoverText(strings.get("board.road", plName), id);  // "Road: " + plName
                         } else {
                             // Scenario _SC_PIRI has warships; check class just in case.
                             hoverIsWarship = (rs instanceof SOCShip) && game.isShipWarship((SOCShip) rs);
                             if (hoverIsWarship)
-                                setHoverText(strings.get("board.warship", plName));  // "Warship: " + plName
+                                setHoverText(strings.get("board.warship", plName), id);  // "Warship: " + plName
                             else
-                                setHoverText(strings.get("board.ship", plName));     // "Ship: " + plName
+                                setHoverText(strings.get("board.ship", plName), id);     // "Ship: " + plName
                         }
 
                         // Can the player move their ship?
@@ -7016,22 +7183,56 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
 
                     if (hoverTextKey != null)
                     {
-                        setHoverText(strings.get(hoverTextKey));
+                        setHoverText(strings.get(hoverTextKey), id);
                         hoverTextSet = true;
                     }
                 }
             }
 
-            // By now we've set hoverRoadID, hoverShipID, hoverCityID, hoverSettlementID, hoverIsPort.
+            // By now we've set hoverRoadID, hoverShipID, hoverCityID, hoverSettlementID.
+            // If debugShowCoordsTooltip their coordinates aren't shown yet with hoverText,
+            // that's done below only if nothing else sets hoverText and returns.
+
             if (hoverTextSet)
             {
+                return;  // <--- Early return: Text and hover-pieces set ---
+            }
+
+            // If nothing more important was found nearby, show port info
+            if (nodePortCoord != -1)
+            {
+                if ((hoverMode == PLACE_INIT_SETTLEMENT) && (hoverID == nodePortCoord) && hoverIsPort)
+                {
+                    // Already looking at a port at this coordinate.
+                    positionToMouse(x,y);
+                } else {
+                    String portText = strings.get(portDescAtNode(nodePortCoord), nodePortType);
+
+                    if (isLargeBoard && game.isGameOptionSet(SOCGameOption.K_SC_FTRI))
+                    {
+                        // Scenario _SC_FTRI: If this port can be reached and moved
+                        // ("gift from the forgotten tribe"), mention that in portText.
+
+                        final SOCBoardLarge bl = (SOCBoardLarge) board;
+                        int portEdge = bl.getPortEdgeFromNode(nodePortCoord);
+                        if ((portEdge != -9) && bl.canRemovePort(portEdge))
+                            portText = strings.get("board.edge.ship_receive_this", portText);
+                                // "Place a ship here to receive this " + portText
+                    }
+
+                    setHoverText(portText, nodePortCoord);
+                    hoverMode = PLACE_INIT_SETTLEMENT;  // const used for hovering-at-port
+                    hoverID = nodePortCoord;
+                    hoverIsPort = true;
+                }
+
                 return;  // <--- Early return: Text and hover-pieces set ---
             }
 
             // If nothing found yet, look for a hex
             //  - reminder: socboard.getHexTypeFromCoord, getNumberOnHexFromCoord, socgame.getPlayersOnHex
             id = findHex(xb,yb);
-            if (id > 0)
+            if ((id > 0) && ! (debugShowCoordsTooltip && (hoverRoadID != 0 || hoverShipID != 0) ))
             {
                 // Are we already looking at it?
                 if (((hoverMode == PLACE_ROBBER) || (hoverMode == PLACE_PIRATE)) && (hoverID == id))
@@ -7044,6 +7245,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                     hoverMode = PLACE_PIRATE;
                 else
                     hoverMode = PLACE_ROBBER;  // const used for hovering-at-hex
+
                 hoverPiece = null;
                 hoverID = id;
 
@@ -7157,7 +7359,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                         key.append(".addi");
                         addinfo = strings.get(addinfo);
                     }
-                    setHoverText(strings.get(key.toString(), hname, dicenum, addinfo));
+                    setHoverText(strings.get(key.toString(), hname, dicenum, addinfo), id);
                 }
 
                 return;  // <--- Early return: Found hex ---
@@ -7168,9 +7370,25 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                 return;
             }
 
-            if ((hoverRoadID != 0) || (hoverShipID != 0))
+            // if we're down here, hoverText was never set, but hoverPieceIDs may be set.
+            // If debugShowCoordsTooltip, show their coordinates with hoverText.
+            // Don't check hoverCityID, because we have a settlement there and its tooltip
+            // already shows the coordinate.
+
+            if ((hoverSettlementID != 0) && debugShowCoordsTooltip)
             {
-                setHoverText(null); // hoverMode = PLACE_ROAD;
+                setHoverText("", hoverSettlementID);
+                return;
+            }
+            else if ((hoverRoadID != 0) || (hoverShipID != 0))
+            {
+                // hoverMode == PLACE_ROAD or PLACE_SHIP
+
+                if (debugShowCoordsTooltip)
+                    setHoverText("", (hoverRoadID != 0) ? hoverRoadID : hoverShipID);
+                else
+                    setHoverText(null, 0); 
+
                 bpanel.repaint();
                 return;
             }
@@ -7181,7 +7399,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
                 setHoverText_modeChangedOrMouseMoved = true;
                 hoverMode = NONE;
             }
-            setHoverText(null);
+            setHoverText(null, 0);
         }
 
         /**
@@ -7346,8 +7564,11 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
           {
               if (mode == MOVE_SHIP)
               {
-                  buildShipItem.setEnabled((hilightAt != 0) && (hilightAt != moveShip_fromEdge));
+                  final boolean enable = (hilightAt != 0) && (hilightAt != moveShip_fromEdge);
+                  buildShipItem.setEnabled(enable);
                   buildShipItem.setLabel(strings.get("board.build.move.ship"));  // "Move Ship"
+                  if (enable)
+                      moveShip_toEdge = hilightAt;
               } else {
                   buildShipItem.setEnabled(false);
                   buildShipItem.setLabel(strings.get("board.build.ship"));  // "Build Ship"
@@ -7677,7 +7898,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
           else if ((target == buildShipItem) && (target != null))
           {
               if (mode == MOVE_SHIP)
-                  tryMoveShipToHilight();
+                  tryMoveShipToEdge();
               else if (isShipMovable)
                   tryMoveShipFromHere();
               else if (game.isGameOptionSet(SOCGameOption.K_SC_FTRI) && ((SOCBoardLarge) board).canRemovePort(hoverShipID))
@@ -7805,7 +8026,7 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
       {
           // Clear the hovering tooltip at fortress, since dialog will change our mouse focus
           hoverTip.setHoverText_modeChangedOrMouseMoved = true;
-          hoverTip.setHoverText(null);
+          hoverTip.setHoverText(null, 0);
 
           java.awt.EventQueue.invokeLater(new ConfirmAttackPirateFortressDialog());
       }
@@ -7866,14 +8087,15 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
        * Assumes player is current, and the ship at {@link #hoverShipID} is movable, when called.
        * Repaints the board.
        *
-       * @param ptype Piece type, like {@link SOCPlayingPiece#ROAD}
        * @since 2.0.00
-       * @see SOCBoardPanel#tryMoveShipToHilight()
+       * @see SOCBoardPanel#tryMoveShipToEdge()
+       * @see SOCBoardPanel#setModeMoveShip(int)
        */
       private void tryMoveShipFromHere()
       {
           playerInterface.printKeyed("board.msg.click.ship.new.loc");  // * "Click the ship's new location."
           moveShip_fromEdge = hoverShipID;
+          moveShip_toEdge = 0;
           moveShip_isWarship = hoverTip.hoverIsWarship;
           mode = MOVE_SHIP;
           hilight = 0;
@@ -7976,9 +8198,10 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
      *
      * This timer will probably not be called, unless there's a large lag
      * between the server and client.  It's here just in case.
-     * Ideally the server responds right away, and the client responds then.
+     * Ideally the server responds right away, and the client responds to that.
      *
      * @see SOCHandPanel#autoRollSetupTimer()
+     * @since 1.1.00
      */
     protected class BoardPanelSendBuildTask extends java.util.TimerTask
     {
@@ -8107,8 +8330,6 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
          * To display the dialog without tying up the client's message-treater thread,
          * call {@link java.awt.EventQueue#invokeLater(Runnable) EventQueue.invokeLater(thisDialog)}.
          *
-         * @param cli     Player client interface
-         * @param gamePI  Current game's player interface
          * @param player  Current player
          * @param newRobHex  The new robber hex, if confirmed; not validated.
          *          Use a negative value if moving the pirate.
@@ -8152,15 +8373,6 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
          */
         @Override
         public void windowCloseChosen() {}
-
-        /**
-         * In the AWT event thread, show ourselves. Do not call directly;
-         * call {@link java.awt.EventQueue#invokeLater(Runnable) EventQueue.invokeLater(thisDialog)}.
-         */
-        public void run()
-        {
-            setVisible(true);
-        }
 
     }  // nested class MoveRobberConfirmDialog
 
@@ -8213,21 +8425,6 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
         @Override
         public void windowCloseChosen() { button2Chosen(); }
 
-        /**
-         * In the AWT event thread, show ourselves. Do not call directly;
-         * call {@link java.awt.EventQueue#invokeLater(Runnable) EventQueue.invokeLater(thisDialog)}.
-         */
-        public void run()
-        {
-            try
-            {
-                setVisible(true);
-            }
-            catch (Throwable e) {
-                e.printStackTrace();
-            }
-        }
-
     }  // nested class ConfirmAttackPirateFortressDialog
 
     /**
@@ -8260,13 +8457,12 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
          * To display the dialog without tying up the client's message-treater thread,
          * call {@link java.awt.EventQueue#invokeLater(Runnable) EventQueue.invokeLater(thisDialog)}.
          *
-         * @param cli     Player client interface
-         * @param gamePI  Current game's player interface
+         * @param edge  The port edge where the ship would be placed
          * @param sendBuildReqFirst  If true, calling from {@link SOCBoardPanel.BoardPopupMenu BoardPopupMenu}, and
-         *            after user confirms, client will need to send {@link BuildRequest} before placement request
+         *            after user confirms, client will need to send {@link soc.message.SOCBuildRequest BUILDREQUEST}
+         *            before placement request
          * @param isMove_fromEdge  Edge to move ship from, or -1 if a placement from player's available pieces;
          *            if moving a ship, {@code sendBuildReqFirst} must be {@code false}.
-         * @param edge  The port edge where the ship would be placed
          */
         private ConfirmPlaceShipDialog(final int edge, final boolean sendBuildReqFirst, final int isMove_fromEdge)
         {
@@ -8324,15 +8520,6 @@ public class SOCBoardPanel extends Canvas implements MouseListener, MouseMotionL
         /** React to the dialog window closed by user. (Don't place the ship) */
         @Override
         public void windowCloseChosen() { button2Chosen(); }
-
-        /**
-         * In the AWT event thread, show ourselves. Do not call directly;
-         * call {@link java.awt.EventQueue#invokeLater(Runnable) EventQueue.invokeLater(thisDialog)}.
-         */
-        public void run()
-        {
-            setVisible(true);
-        }
 
     }  // nested class ConfirmPlaceShipDialog
 

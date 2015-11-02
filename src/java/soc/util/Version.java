@@ -1,7 +1,7 @@
 package soc.util;
 
 // Version.java - mchenryc@acm.org Chadwick A. McHenry
-// Portions copyright (C) 2008,2010,2011,2013 Jeremy D Monin <jeremy@nand.net>
+// Portions copyright (C) 2008,2010,2011,2013-2015 Jeremy D Monin <jeremy@nand.net>
 
 import java.io.InputStream;
 import java.io.PrintStream;
@@ -25,7 +25,9 @@ public class Version {
 
   /**
    * For minimum version required; warn in NewGameOptionsFrame only
-   * if game options require newer than this versionnum.
+   * if game options require newer than this version number.
+   * Property name {@code versionnumMaxNoWarn} in {@code build.xml}.
+   * @see #versionNumberMaximumNoWarn()
    * @since 1.1.13
    */
   public static final String VERSNUM_NOWARN_MAXIMUM = "project.versionnumMaxNoWarn";
@@ -88,9 +90,10 @@ public class Version {
       else
       {
           StringBuffer sb = new StringBuffer(Integer.toString(versionNumber));
-          sb.insert(2, '.');
-          sb.insert(1, '.');
-          return sb.toString();  // 1.1.09
+          final int L = sb.length();
+          sb.insert(L-2, '.');
+          sb.insert(L-3, '.');
+          return sb.toString();  // 1.1.09 or 12.3.08
       }
   }
 
@@ -120,9 +123,12 @@ public class Version {
   /**
    * For new game creation, return the minimum recent version number to
    * not warn during new game creation;
-   * should be the version released about a year ago.
+   * should be a version released more than a year ago.
    * If game options require a newer version, warn about that
-   * in NewGameOptionsFrame.
+   * in the {@code NewGameOptionsFrame} options dialog.
+   *<P>
+   * To view or set this version, see {@link #VERSNUM_NOWARN_MAXIMUM}.
+   *
    * @return Version integer; 1108 is version 1.1.08.
    *         If the version number cannot be read, -1 is returned.
    * @see #versionNumber()
